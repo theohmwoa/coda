@@ -1,6 +1,6 @@
-# coda — minimal CodeAct runtime with first-class observability
+# coda — a CodeAct coding harness with typed sub-agents and line-level observability
 
-> Python agents that **write code instead of calling tools**, with a hookable runtime so debuggers, replay tools, and model routers can plug straight in.
+> A Claude-Code-shaped coding harness, packaged as a clean Python library. Native filesystem tools, typed sub-agents inside loops, and `sys.settrace` line-by-line observability for every byte of generated code.
 
 ## Origin
 
@@ -18,16 +18,47 @@ Two years later, the industry has converged on this pattern. The original CodeAc
 
 `coda` is the clean version. The clever bits from Mirage, extracted, plus what I think we got wrong, rebuilt.
 
-## What's clever (kept from Mirage)
+## The three design moves
 
-- **Tools live as files, not entries in a registry.** Point the agent at a directory like `./interfaces/{gmail,slack,github,stripe,...}/*.py` and don't enumerate them in the system prompt. The agent **discovers** what's available with `os.listdir`, `pathlib.Path.glob`, and `grep`, then `import`s what it needs. **The prompt is O(1); the toolspace is unbounded.** This is the single biggest design move and the one that lets CodeAct actually scale.
-- **Persistent execution context** — variables defined in turn N are visible in turn N+1. The LLM can build up state across multiple code blocks within one conversation.
-- **Tool functions as native Python** — each tool is a `.py` file containing one function with a docstring (and optional edge-case comments). The agent reads the file with `cat` before calling it, so it sees the actual implementation, not a synthesized summary.
-- **Typed sub-agents as tools** — a sub-agent isn't just "another tool that returns a string". It's a `@subagent`-decorated Python function with a Pydantic return type. The inner Claude call is *forced* to produce that shape (via Anthropic's tool-use schema); the outer agent sees the typed signature in its system prompt and can navigate the return value structurally — `if verdict.is_redeye and verdict.layover_score < 4: ...`. No parsing, no try/except, no "did the model return what I asked for?" guesswork.
-- **Sub-agent calls inside loops** — because a sub-agent call is just a Python function, the LLM can write `for item in items: r = evaluate(item)`, and each inner Claude call runs with fresh, isolated context. No context bloat from the loop.
-- **Approval gates as Python decorators** — certain tools pause and ask for human confirmation before running. That's just a wrapper, not a special protocol.
+### 1. Coding-harness primitives, not raw Python builtins
 
-## What I think we got wrong (rebuilt)
+Every coding agent in production — Claude Code, Aider, OpenHands — exposes a small, well-curated set of filesystem and shell primitives instead of forcing the model to write `import pathlib; for p in pathlib.Path(...)...`. coda does the same:
+
+```
+ls(path)              # → directory entries
+glob(pattern)         # → matching paths
+grep(pattern, path)   # → matching lines, with line numbers
+read(path)            # → file contents
+write(path, content)  # → write file
+edit(path, old, new)  # → find/replace in file
+bash(cmd)             # → shell command (timeout-bounded)
+```
+
+These are available as Python functions in the sandbox globals. The system prompt is borrowed in spirit from the (now-public) Claude Code design: clear, tool-first, no LangChain-style indirection. The agent doesn't write `os.listdir`; it writes `ls("interfaces")`.
+
+### 2. Tools live as files, discovered by the agent (kept from MirageAI)
+
+Point the agent at a directory like `./interfaces/{gmail,slack,github,stripe,...}/*.py` and don't enumerate them in the system prompt. The agent discovers what's available with its native `ls`/`glob`/`grep` primitives, reads the implementation of what it needs, then imports it as normal Python. **Prompt size is O(1); toolspace is unbounded.** Add 1,000 more `.py` files; the prompt doesn't grow.
+### 3. Typed sub-agents with dual schema flow
+
+A sub-agent isn't just "another tool that returns a string". It's a `@subagent`-decorated Python function with a Pydantic return type. Two things happen:
+
+- The **inner Claude call** is *forced* to produce that shape via Anthropic's tool-use schema enforcement
+- The **outer agent's system prompt** is augmented with the typed signature, so its generated code can navigate the return value structurally — `if verdict.is_redeye and verdict.layover_score < 4: ...`
+
+No parsing, no try/except, no "did the model return what I asked for?" guesswork. Because the sub-agent is just a Python function, the LLM can call it inside a `for` loop: each iteration is a fresh-context Claude call, and the outer loop doesn't bloat. **This is the single most powerful pattern carried over from MirageAI.**
+
+### Plus
+
+- **Persistent execution context** — variables in turn N are visible in turn N+1.
+- **Approval gates as decorators** — destructive tools pause for human confirmation. `@coda.requires_approval` wraps any tool. No special protocol.
+- **Line-by-line observability** — `sys.settrace` captures every line of generated code, every variable assignment, every tool call as a typed event. `HookRegistry` lets debuggers, audit tools, and routers subscribe.
+
+## Cost notes
+
+`coda` calls Anthropic's API directly. From **June 15, 2026**, every paid Claude plan gets a dedicated programmatic-usage credit that covers Agent SDK / `claude -p` / third-party SDK use ([Anthropic announcement](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)): $20/mo on Pro, $100/mo on Max 5x, $200/mo on Max 20x. Billed at full API rates from that pool, non-rollover. For solo development that's enough headroom to run real loops.
+
+## What I think we got wrong in Mirage (rebuilt)
 
 - **Subprocess-based execution.** Mirage ran each generated workflow in a fresh Python subprocess via Claude Code. Clean isolation but expensive, and persistent state across turns was awkward. `coda` uses an in-process sandbox with `sys.settrace` for line-by-line instrumentation and an explicit globals dict for state — orders of magnitude faster and instrumentable at the bytecode level.
 - **Print-style logs instead of structured events.** Mirage emitted human-readable strings. `coda` emits structured events through a `HookRegistry` — every line execution, every tool call, every variable assignment is a typed event that downstream tools (debuggers, audit, replay) subscribe to.
