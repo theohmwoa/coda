@@ -1,21 +1,27 @@
-"""coda — minimal CodeAct runtime with first-class observability."""
+"""coda — a CodeAct coding harness with typed sub-agents and line-level observability."""
 
-from .agent import Agent
-from .hooks import HookRegistry, Event
-from .sandbox import Sandbox, ExecutionResult
-from .subagents import subagent, SubAgent
-from .tools import tool, Tool
+from .llm import (
+    AnthropicClient,
+    ClaudeCodeClient,
+    CompletionResponse,
+    LLMClient,
+    Message,
+    MockLLMClient,
+    ToolCall,
+    ToolChoice,
+    ToolSchema,
+)
 
 __version__ = "0.0.1"
 
 __all__ = [
-    "Agent",
-    "Sandbox",
-    "ExecutionResult",
-    "HookRegistry",
-    "Event",
-    "tool",
-    "Tool",
-    "subagent",
-    "SubAgent",
+    "LLMClient",
+    "Message",
+    "CompletionResponse",
+    "ToolCall",
+    "ToolChoice",
+    "ToolSchema",
+    "MockLLMClient",
+    "ClaudeCodeClient",
+    "AnthropicClient",
 ]
