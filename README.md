@@ -20,9 +20,10 @@ Two years later, the industry has converged on this pattern. The original CodeAc
 
 ## What's clever (kept from Mirage)
 
+- **Tools live as files, not entries in a registry.** Point the agent at a directory like `./interfaces/{gmail,slack,github,stripe,...}/*.py` and don't enumerate them in the system prompt. The agent **discovers** what's available with `os.listdir`, `pathlib.Path.glob`, and `grep`, then `import`s what it needs. **The prompt is O(1); the toolspace is unbounded.** This is the single biggest design move and the one that lets CodeAct actually scale.
 - **Persistent execution context** — variables defined in turn N are visible in turn N+1. The LLM can build up state across multiple code blocks within one conversation.
-- **Tool functions as native Python** — tools are `@tool`-decorated Python functions injected into the sandbox globals. The model writes `result = search_flights("CDG", "JFK")` — no JSON, no schemas, no bridges.
-- **Typed sub-agents as tools** — a sub-agent isn't just "another tool that returns a string". It's a `@subagent`-decorated Python function with a Pydantic return type. The inner Claude call is *forced* to produce that shape (via Anthropic's tool-use schema); the outer agent sees the typed signature in its system prompt and can navigate the return value structurally — `if verdict.is_redeye and verdict.layover_score < 4: ...`. No parsing, no try/except, no "did the model return what I asked for?" guesswork. This is the single biggest power feature carried over from Mirage.
+- **Tool functions as native Python** — each tool is a `.py` file containing one function with a docstring (and optional edge-case comments). The agent reads the file with `cat` before calling it, so it sees the actual implementation, not a synthesized summary.
+- **Typed sub-agents as tools** — a sub-agent isn't just "another tool that returns a string". It's a `@subagent`-decorated Python function with a Pydantic return type. The inner Claude call is *forced* to produce that shape (via Anthropic's tool-use schema); the outer agent sees the typed signature in its system prompt and can navigate the return value structurally — `if verdict.is_redeye and verdict.layover_score < 4: ...`. No parsing, no try/except, no "did the model return what I asked for?" guesswork.
 - **Sub-agent calls inside loops** — because a sub-agent call is just a Python function, the LLM can write `for item in items: r = evaluate(item)`, and each inner Claude call runs with fresh, isolated context. No context bloat from the loop.
 - **Approval gates as Python decorators** — certain tools pause and ask for human confirmation before running. That's just a wrapper, not a special protocol.
 
@@ -46,6 +47,8 @@ Week 1 of a 4-week solo build:
 
 ## Target API (week 1)
 
+**Option A — small inline set** (for quick scripts):
+
 ```python
 import coda
 from pydantic import BaseModel
@@ -65,39 +68,107 @@ class FlightVerdict(BaseModel):
 @coda.subagent(model="claude-haiku-4-5")
 def evaluate_flight(flight: dict) -> FlightVerdict:
     """Evaluate one flight on redeye + layover dimensions. Be strict."""
-    # No body — coda generates the prompt from signature + docstring + return schema,
-    # forces the inner Claude call to produce a FlightVerdict via tool-use schema.
 
 agent = coda.Agent(
     model="claude-sonnet-4-6",
-    tools=[search_flights, evaluate_flight],
+    tools=[search_flights],
+    subagents=[evaluate_flight],
 )
-
 result = agent.run("Find me the best non-redeye flight CDG→JFK under €600 next month.")
-print(result)
 ```
 
-The agent might emit code like:
+**Option B — filesystem as the tool registry** (the real pattern, scales to thousands):
+
+```
+my-agent/
+  interfaces/
+    gmail/
+      send_email.py
+      list_unread.py
+      search_threads.py
+    slack/
+      post_message.py
+    github/
+      open_pr.py
+      list_issues.py
+    stripe/
+      list_invoices.py
+    data/
+      query_postgres.py
+  subagents/
+    evaluate_flight.py
+```
 
 ```python
-options = search_flights("CDG", "JFK", max_price=600)
-keepers = []
-for f in options:
-    v = evaluate_flight(f)             # ← typed sub-agent call, fresh context
-    if not v.is_redeye and v.layover_score < 4 and v.confidence == "high":
-        keepers.append((f, v.reasoning))
-best = min(keepers, key=lambda x: x[0]["price"])
-print(best)
+agent = coda.Agent(
+    model="claude-sonnet-4-6",
+    tools_dir="./interfaces",        # agent discovers, doesn't enumerate
+    subagents_dir="./subagents",
+)
+result = agent.run("Triage my unread emails, draft replies to the ones flagged urgent.")
 ```
 
-Notice three things:
-1. **`evaluate_flight` inside a `for` loop** — each iteration is a fresh Claude call with isolated context. With tool-calling, those 20 iterations would bloat the outer agent's context past 100K tokens.
-2. **`v.is_redeye`, `v.layover_score`, `v.confidence`** — the outer agent can write code that navigates the *typed* return value because the schema flows into its system prompt. Mirage's design move; coda's first-class feature.
-3. **No JSON parsing.** The inner Claude call is forced (via Anthropic's tool-use schema enforcement) to return a `FlightVerdict`-shaped object. coda deserialises into the Pydantic model. If the model can't produce the schema, coda retries with the error — the outer agent never sees a malformed payload.
+System prompt (auto-generated, tiny):
+```
+Your interfaces live in ./interfaces/. Each file contains one function with a
+docstring. Discover what's available with os.listdir, pathlib.Path.glob, or grep.
+Import what you need: from interfaces.gmail.send_email import send_email.
+...
+```
+
+The agent's first code blocks might be:
+
+```python
+# Block 1: explore the tree
+import pathlib
+for p in pathlib.Path("interfaces").iterdir():
+    print(p.name, [f.name for f in p.iterdir()])
+```
+```output
+gmail  ['send_email.py', 'list_unread.py', 'search_threads.py']
+slack  ['post_message.py']
+...
+```
+
+```python
+# Block 2: read the implementation of the tools it actually needs
+print(pathlib.Path("interfaces/gmail/list_unread.py").read_text())
+print(pathlib.Path("interfaces/gmail/send_email.py").read_text())
+```
+```output
+def list_unread(label: str = "INBOX", max: int = 50) -> list[Email]:
+    """Return up to `max` unread emails in `label`. Ordered by date desc."""
+    ...
+def send_email(to: str, subject: str, body: str, reply_to: str | None = None):
+    """Send an email. Rate-limited: 100/hour. Returns the message_id."""
+    ...
+```
+
+```python
+# Block 3: actually do the work — and notice the typed sub-agent IN the loop
+from interfaces.gmail.list_unread import list_unread
+from interfaces.gmail.send_email import send_email
+from subagents.is_urgent import is_urgent  # typed sub-agent: returns UrgencyVerdict
+
+unread = list_unread(max=100)
+drafts = []
+for email in unread:
+    v = is_urgent(email)                      # fresh-context Claude call per email
+    if v.score >= 8 and v.confidence == "high":
+        drafts.append((email, v.suggested_reply))
+print(f"Drafted {len(drafts)} replies for review.")
+```
+
+What this gives you:
+
+- **The outer agent's prompt mentions zero specific tools.** It mentions only the *protocol* for finding them. Add 1,000 more interfaces tomorrow; the prompt stays the same size.
+- **The agent sees the actual implementation** of each tool, including edge-case comments (e.g. the "rate-limited: 100/hour" line on `send_email`). No synthesized tool description; the source is the contract.
+- **Typed sub-agents inside loops** — each `is_urgent(email)` call runs Claude in fresh context, returns a typed `UrgencyVerdict` the outer agent navigates as `v.score`, `v.confidence`, `v.suggested_reply`. No parsing.
+- **No JSON, no schemas in prompts, no MCP server boilerplate.** It's just Python files in a directory.
 
 ## Architecture (one paragraph)
 
-The agent loop alternates between an Anthropic call (model emits text, stopping at a code-block boundary) and a sandbox execution (in-process `exec` against a persistent globals dict, instrumented with `sys.settrace` so every line emits a structured event). Tools and sub-agents are registered via decorator and injected into the sandbox globals as ordinary callables. **Sub-agents** are special: at registration time, coda inspects the Pydantic return type and generates an Anthropic tool-use schema; at call-time, the inner Claude call is *forced* to produce that schema and coda deserialises into the typed object. The signature flows into the outer agent's system prompt so its generated code can navigate `verdict.field` structurally. A `HookRegistry` lets external tools (debuggers, audit, model routers) subscribe to typed events: `code_emitted`, `line_executed`, `tool_called`, `subagent_called`, `variable_assigned`, `execution_error`, `turn_complete`. The runtime is ~500 lines with two external dependencies (`anthropic`, `pydantic`).
+The agent loop alternates between an Anthropic call (model emits text, stopping at a code-block boundary) and a sandbox execution (in-process `exec` against a persistent globals dict, instrumented with `sys.settrace` so every line emits a structured event). **Tools live as files** under `tools_dir`; the agent discovers them with `os.listdir`/`glob`/`grep` and imports what it needs — the system prompt enumerates the protocol, not the toolset, so a 10,000-file workspace costs the same prompt tokens as a 10-file one. Small inline tools registered via the `@tool` decorator are also injected into the sandbox globals for convenience. **Sub-agents** are special: at registration time, coda inspects the Pydantic return type and generates an Anthropic tool-use schema; at call-time, the inner Claude call is *forced* to produce that schema and coda deserialises into the typed object. The signature flows into the outer agent's system prompt so its generated code can navigate `verdict.field` structurally. A `HookRegistry` lets external tools (debuggers, audit, model routers) subscribe to typed events: `code_emitted`, `line_executed`, `tool_imported`, `tool_called`, `subagent_called`, `variable_assigned`, `execution_error`, `turn_complete`. The runtime is ~500 lines with two external dependencies (`anthropic`, `pydantic`).
 
 ## Why open source
 
