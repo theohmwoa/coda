@@ -17,6 +17,7 @@ from .prompt import Assembler, Section, build_system_prompt, default_assembler
 from .sandbox import ExecutionResult, Sandbox
 from .subagents import SubAgent, subagent
 from .tools import Tool, tool
+from .trace import TraceWriter, iter_trace, read_trace
 
 __version__ = "0.0.1"
 
@@ -36,6 +37,9 @@ __all__ = [
     "default_assembler",
     "Assembler",
     "Section",
+    "TraceWriter",
+    "read_trace",
+    "iter_trace",
     "LLMClient",
     "Message",
     "CompletionResponse",

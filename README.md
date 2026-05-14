@@ -70,9 +70,10 @@ No parsing, no try/except, no "did the model return what I asked for?" guesswork
 Week 1 of a 4-week solo build:
 
 - [x] Project scaffold
-- [ ] Agent loop + sandbox + tool registry + hook registry
-- [ ] First end-to-end demo (week 1 target)
-- [ ] Trace writer + replay CLI (week 2)
+- [x] Agent loop + sandbox + tool registry + hook registry
+- [x] First end-to-end demo (week 1 target) — `examples/triage_todos.py`, `examples/scripted_demo.py`
+- [x] JSONL trace writer (week 2, part 1) — `coda.TraceWriter` + `read_trace` / `iter_trace`
+- [ ] Replay CLI (week 2, part 2)
 - [ ] `codetrace` web UI on top — time-traveling debugger (week 3)
 - [ ] Docs + launch (week 4)
 
