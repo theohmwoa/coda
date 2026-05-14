@@ -3,6 +3,7 @@
 from .agent import Agent
 from .hooks import HookRegistry, Event
 from .sandbox import Sandbox, ExecutionResult
+from .subagents import subagent, SubAgent
 from .tools import tool, Tool
 
 __version__ = "0.0.1"
@@ -15,4 +16,6 @@ __all__ = [
     "Event",
     "tool",
     "Tool",
+    "subagent",
+    "SubAgent",
 ]

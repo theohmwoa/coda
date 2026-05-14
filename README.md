@@ -22,7 +22,8 @@ Two years later, the industry has converged on this pattern. The original CodeAc
 
 - **Persistent execution context** — variables defined in turn N are visible in turn N+1. The LLM can build up state across multiple code blocks within one conversation.
 - **Tool functions as native Python** — tools are `@tool`-decorated Python functions injected into the sandbox globals. The model writes `result = search_flights("CDG", "JFK")` — no JSON, no schemas, no bridges.
-- **Sub-agent calls as tools** — `claude_judge(...)` can be a tool, which means an LLM call inside a `for` loop runs with fresh, isolated context. No context bloat from the inner loop.
+- **Typed sub-agents as tools** — a sub-agent isn't just "another tool that returns a string". It's a `@subagent`-decorated Python function with a Pydantic return type. The inner Claude call is *forced* to produce that shape (via Anthropic's tool-use schema); the outer agent sees the typed signature in its system prompt and can navigate the return value structurally — `if verdict.is_redeye and verdict.layover_score < 4: ...`. No parsing, no try/except, no "did the model return what I asked for?" guesswork. This is the single biggest power feature carried over from Mirage.
+- **Sub-agent calls inside loops** — because a sub-agent call is just a Python function, the LLM can write `for item in items: r = evaluate(item)`, and each inner Claude call runs with fresh, isolated context. No context bloat from the loop.
 - **Approval gates as Python decorators** — certain tools pause and ask for human confirmation before running. That's just a wrapper, not a special protocol.
 
 ## What I think we got wrong (rebuilt)
@@ -47,44 +48,56 @@ Week 1 of a 4-week solo build:
 
 ```python
 import coda
-from anthropic import Anthropic
+from pydantic import BaseModel
+from typing import Literal
 
 @coda.tool
-def add(a: int, b: int) -> int:
-    return a + b
+def search_flights(origin: str, dest: str, max_price: int) -> list[dict]:
+    """Return matching flight offers."""
+    ...
 
-@coda.tool
-def claude_judge(text: str, question: str) -> str:
-    """A sub-agent call — fresh context per invocation."""
-    resp = Anthropic().messages.create(
-        model="claude-haiku-4-5",
-        max_tokens=200,
-        messages=[{"role": "user", "content": f"{text}\n\nQuestion: {question}\nAnswer with yes/no/maybe."}],
-    )
-    return resp.content[0].text
+class FlightVerdict(BaseModel):
+    is_redeye: bool
+    layover_score: int       # 0 = none, 10 = brutal
+    confidence: Literal["low", "medium", "high"]
+    reasoning: str
+
+@coda.subagent(model="claude-haiku-4-5")
+def evaluate_flight(flight: dict) -> FlightVerdict:
+    """Evaluate one flight on redeye + layover dimensions. Be strict."""
+    # No body — coda generates the prompt from signature + docstring + return schema,
+    # forces the inner Claude call to produce a FlightVerdict via tool-use schema.
 
 agent = coda.Agent(
     model="claude-sonnet-4-6",
-    tools=[add, claude_judge],
+    tools=[search_flights, evaluate_flight],
 )
 
-result = agent.run("Sum the first 50 even numbers, then judge whether the result is interesting.")
+result = agent.run("Find me the best non-redeye flight CDG→JFK under €600 next month.")
 print(result)
 ```
 
-The agent might emit:
+The agent might emit code like:
 
 ```python
-total = sum(2 * i for i in range(1, 51))
-verdict = claude_judge(str(total), "Is this an interesting number?")
-print(total, verdict)
+options = search_flights("CDG", "JFK", max_price=600)
+keepers = []
+for f in options:
+    v = evaluate_flight(f)             # ← typed sub-agent call, fresh context
+    if not v.is_redeye and v.layover_score < 4 and v.confidence == "high":
+        keepers.append((f, v.reasoning))
+best = min(keepers, key=lambda x: x[0]["price"])
+print(best)
 ```
 
-Notice the `claude_judge` call **inside** a context where Python has already done the arithmetic. The sub-agent reasons about a small concrete value in fresh context, then its verdict comes back as a normal Python variable. That's the CodeAct pattern in one line — and it's the thing tool-calling agents fundamentally can't do.
+Notice three things:
+1. **`evaluate_flight` inside a `for` loop** — each iteration is a fresh Claude call with isolated context. With tool-calling, those 20 iterations would bloat the outer agent's context past 100K tokens.
+2. **`v.is_redeye`, `v.layover_score`, `v.confidence`** — the outer agent can write code that navigates the *typed* return value because the schema flows into its system prompt. Mirage's design move; coda's first-class feature.
+3. **No JSON parsing.** The inner Claude call is forced (via Anthropic's tool-use schema enforcement) to return a `FlightVerdict`-shaped object. coda deserialises into the Pydantic model. If the model can't produce the schema, coda retries with the error — the outer agent never sees a malformed payload.
 
 ## Architecture (one paragraph)
 
-The agent loop alternates between an Anthropic call (model emits text, stopping at a code-block boundary) and a sandbox execution (in-process `exec` against a persistent globals dict, instrumented with `sys.settrace` so every line emits a structured event). Tools are registered via decorator and injected into the sandbox globals as ordinary callables. A `HookRegistry` lets external tools (debuggers, audit, model routers) subscribe to typed events: `code_emitted`, `line_executed`, `tool_called`, `variable_assigned`, `execution_error`, `turn_complete`. The runtime is ~500 lines with one external dependency (`anthropic`).
+The agent loop alternates between an Anthropic call (model emits text, stopping at a code-block boundary) and a sandbox execution (in-process `exec` against a persistent globals dict, instrumented with `sys.settrace` so every line emits a structured event). Tools and sub-agents are registered via decorator and injected into the sandbox globals as ordinary callables. **Sub-agents** are special: at registration time, coda inspects the Pydantic return type and generates an Anthropic tool-use schema; at call-time, the inner Claude call is *forced* to produce that schema and coda deserialises into the typed object. The signature flows into the outer agent's system prompt so its generated code can navigate `verdict.field` structurally. A `HookRegistry` lets external tools (debuggers, audit, model routers) subscribe to typed events: `code_emitted`, `line_executed`, `tool_called`, `subagent_called`, `variable_assigned`, `execution_error`, `turn_complete`. The runtime is ~500 lines with two external dependencies (`anthropic`, `pydantic`).
 
 ## Why open source
 
