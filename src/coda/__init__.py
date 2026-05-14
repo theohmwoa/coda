@@ -13,7 +13,7 @@ from .llm import (
     ToolChoice,
     ToolSchema,
 )
-from .prompt import build_system_prompt
+from .prompt import Assembler, Section, build_system_prompt, default_assembler
 from .sandbox import ExecutionResult, Sandbox
 from .subagents import SubAgent, subagent
 from .tools import Tool, tool
@@ -33,6 +33,9 @@ __all__ = [
     "subagent",
     "SubAgent",
     "build_system_prompt",
+    "default_assembler",
+    "Assembler",
+    "Section",
     "LLMClient",
     "Message",
     "CompletionResponse",

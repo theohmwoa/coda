@@ -22,7 +22,7 @@ from typing import Any
 
 from .hooks import Event, HookRegistry
 from .llm import LLMClient, Message
-from .prompt import build_system_prompt
+from .prompt import Assembler, build_system_prompt, default_assembler
 from .sandbox import ExecutionResult, Sandbox
 from .subagents import SubAgent
 from .tools import Tool
@@ -57,6 +57,7 @@ class Agent:
         tools_dir: str | None = None,
         system_prompt: str | None = None,
         system_prompt_append: str | None = None,
+        prompt_assembler: Assembler | None = None,
         max_turns: int = 25,
         max_tokens: int = 4096,
     ) -> None:
@@ -76,12 +77,17 @@ class Agent:
         for t in self.tools:
             self.sandbox.inject(t.name, t)
 
-        self._system_prompt = system_prompt or build_system_prompt(
-            tools=self.tools,
-            subagents=self.subagents,
-            tools_dir=self.tools_dir,
-            extra=system_prompt_append,
-        )
+        self.prompt_assembler = prompt_assembler or default_assembler()
+        if system_prompt is not None:
+            self._system_prompt = system_prompt
+        else:
+            self._system_prompt = build_system_prompt(
+                tools=self.tools,
+                subagents=self.subagents,
+                tools_dir=self.tools_dir,
+                extra=system_prompt_append,
+                assembler=self.prompt_assembler,
+            )
 
     @property
     def system_prompt(self) -> str:
