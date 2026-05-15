@@ -9,7 +9,7 @@
 - **Typed sub-agents.** `@coda.subagent` decorates a function with a Pydantic return type. Each call is a fresh-context LLM completion with forced tool-use schema, returning a validated Pydantic object. Designed to be called from inside a `for` loop without bloating the outer context.
 - **Line-level observability.** `sys.settrace` captures every line of model-emitted code. A `HookRegistry` lets you subscribe to typed events — `code_emitted`, `line_executed`, `tool_called`, `subagent_called`, `llm_request`, etc.
 - **JSONL trace writer.** `coda.TraceWriter` attaches to a `HookRegistry` and streams every event to a JSONL file. The wire format the future debugger UI will replay.
-- **Pluggable LLM backend.** Three backends ship: `MockLLMClient` (tests / canned demos), `ClaudeCodeClient` (`claude -p` subprocess — free under a paid Claude plan today), `AnthropicClient` (direct SDK).
+- **Pluggable LLM backend.** Four backends ship: `MockLLMClient` (tests / canned demos), `ClaudeCodeClient` (`claude -p` subprocess — billed to your Claude plan today), `ClaudeAgentSDKClient` (official `claude-agent-sdk` Python package — same subscription billing, no subprocess fork per call), `AnthropicClient` (direct SDK, API-key billed).
 - **Cache-aware prompt assembler.** Sections are marked cache-stable or cache-breaking and rendered in that order, so adding a tool invalidates only the prompt suffix.
 
 ## Install
@@ -128,7 +128,12 @@ No parsing, no try/except, no "did the model return what I asked for?" guesswork
 
 From **June 15, 2026**, every paid Claude plan gets a dedicated programmatic-usage credit that covers Agent SDK / `claude -p` / third-party SDK use ([Anthropic announcement](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)): $20/mo on Pro, $100/mo on Max 5x, $200/mo on Max 20x. Billed at full API rates from that pool, non-rollover.
 
-Before June 15, `ClaudeCodeClient` lets you drive coda for free against a paid plan — it shells out to `claude -p` so the work is billed to your subscription, not the API. After June 15, switch to `AnthropicClient` (or keep both and pick at runtime).
+Two ways to bill to your Claude plan today (no API key, no API budget):
+
+- **`ClaudeCodeClient`** — shells out to `claude -p` per call. Zero dependencies beyond the Claude Code CLI; portable; one subprocess fork per coda turn.
+- **`ClaudeAgentSDKClient`** — uses the official `claude-agent-sdk` Python package. Same auth path (Claude Code's OAuth token), no fork per call. Requires `pip install claude-agent-sdk` and `claude login`; make sure `ANTHROPIC_API_KEY` is unset or it'll shadow the OAuth token.
+
+Switch to `AnthropicClient` whenever you want API-key billing (the post-June-15 credit pool route, or production where you don't want to depend on a developer's subscription).
 
 ## What I think we got wrong in Mirage (rebuilt)
 

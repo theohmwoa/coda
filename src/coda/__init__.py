@@ -4,6 +4,7 @@ from .agent import Agent, RunResult
 from .hooks import Event, EventType, HookRegistry
 from .llm import (
     AnthropicClient,
+    ClaudeAgentSDKClient,
     ClaudeCodeClient,
     CompletionResponse,
     LLMClient,
@@ -48,5 +49,6 @@ __all__ = [
     "ToolSchema",
     "MockLLMClient",
     "ClaudeCodeClient",
+    "ClaudeAgentSDKClient",
     "AnthropicClient",
 ]

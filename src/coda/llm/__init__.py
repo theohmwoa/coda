@@ -27,6 +27,7 @@ from .base import (
 from .mock import MockCall, MockLLMClient, tool_call_response
 
 if TYPE_CHECKING:
+    from .agent_sdk_client import ClaudeAgentSDKClient
     from .anthropic_client import AnthropicClient
     from .claude_code_client import ClaudeCodeClient
 
@@ -38,6 +39,9 @@ def __getattr__(name: str):
     if name == "ClaudeCodeClient":
         from .claude_code_client import ClaudeCodeClient as _CCC
         return _CCC
+    if name == "ClaudeAgentSDKClient":
+        from .agent_sdk_client import ClaudeAgentSDKClient as _CAS
+        return _CAS
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -53,4 +57,5 @@ __all__ = [
     "tool_call_response",
     "AnthropicClient",
     "ClaudeCodeClient",
+    "ClaudeAgentSDKClient",
 ]
