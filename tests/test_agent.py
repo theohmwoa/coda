@@ -79,6 +79,78 @@ def test_loop_runs_one_code_block_and_finishes(tmp_path):
     assert "x.txt" in result.executions[0].stdout
 
 
+def test_multi_block_response_runs_all_blocks(tmp_path):
+    """Backends that wrap an internal agent loop emit several fenced blocks
+    per response; coda must run every one of them, not just the first."""
+    mock = MockLLMClient(
+        responses=[
+            CompletionResponse(
+                text="""I'll do this in two parts.
+
+```python
+x = 7
+print('part one done')
+```
+
+Now the second part:
+
+```python
+y = x * 6
+print(f'part two: {y}')
+```
+"""
+            ),
+            CompletionResponse(text="all done."),
+        ]
+    )
+    agent = Agent(model="m", llm=mock, sandbox=Sandbox(root=tmp_path))
+    result = agent.run("two parts")
+    assert result.turns == 2
+    # Both blocks must have written stdout
+    assert "part one done" in result.executions[0].stdout
+    assert "part two: 42" in result.executions[1].stdout
+
+
+def test_syntax_error_in_one_block_does_not_void_prior_blocks(tmp_path):
+    """The framework_compare bug: one syntax-erroring block must not erase
+    the side effects (file writes, prints, state) of earlier successful
+    blocks in the same turn."""
+    mock = MockLLMClient(
+        responses=[
+            CompletionResponse(
+                text="""```python
+write('survived.txt', 'hello')
+print('block 1 ok')
+```
+
+```python
+def broken(:
+    pass
+```
+
+```python
+write('never_ran.txt', 'should not exist')
+```
+"""
+            ),
+            CompletionResponse(text="done."),
+        ]
+    )
+    agent = Agent(model="m", llm=mock, sandbox=Sandbox(root=tmp_path))
+    result = agent.run("mixed")
+    # Block 1 produced its side effect (the file)
+    assert (tmp_path / "survived.txt").exists()
+    assert (tmp_path / "survived.txt").read_text() == "hello"
+    # Block 3 never ran
+    assert not (tmp_path / "never_ran.txt").exists()
+    # Block 2 surfaced as an error
+    # messages: [0]=user prompt, [1]=assistant response, [2]=execution feedback
+    feedback = result.messages[2].content
+    assert "SyntaxError" in feedback
+    assert "blocks_run='2'" in feedback
+    assert "blocks_emitted='3'" in feedback
+
+
 def test_persistent_state_across_turns(tmp_path):
     mock = MockLLMClient(
         responses=[

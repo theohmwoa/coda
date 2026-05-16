@@ -150,17 +150,25 @@ class Agent:
                     output_tokens=out_tokens,
                 )
 
-            # Concatenate every fenced code block in this turn into one exec.
-            # Backends that wrap Claude Code's own loop (ClaudeAgentSDKClient,
-            # ClaudeCodeClient) tend to emit several code blocks per response,
-            # interleaved with prose narration. Running only the first would
-            # silently drop the rest and the agent would falsely believe the
-            # work succeeded. They share globals anyway, so concat-and-exec
-            # preserves their ordering and any cross-block state.
-            code = "\n\n# --- next block ---\n\n".join(blocks)
-            result = self.sandbox.execute(code)
-            executions.append(result)
-            feedback = _format_execution(result)
+            # Execute every fenced code block in this turn, one at a time,
+            # against the shared persistent sandbox globals. Backends that
+            # wrap Claude Code's own loop tend to emit several blocks per
+            # response, and we'd silently lose all but the first if we only
+            # ran one. We deliberately exec block-by-block (not concatenated)
+            # so a SyntaxError in block N doesn't void blocks 1..N-1 — that
+            # bit us in framework_compare when one block had stray markdown
+            # em-dashes and erased all the prior assess() sub-agent results.
+            block_results: list[ExecutionResult] = []
+            for i, block in enumerate(blocks, start=1):
+                r = self.sandbox.execute(block)
+                block_results.append(r)
+                executions.append(r)
+                if r.error is not None:
+                    # Stop on first failure — let the agent see the error
+                    # in feedback and decide what to do next turn. Subsequent
+                    # blocks would likely depend on this one's state.
+                    break
+            feedback = _format_block_results(block_results, total_blocks=len(blocks))
             messages.append(Message(role="user", content=feedback))
             self.hooks.emit(
                 Event(
@@ -219,4 +227,35 @@ def _format_execution(result: ExecutionResult) -> str:
     if not result.stdout and not result.stderr and not result.error:
         parts.append("<stdout>(empty)</stdout>")
     parts.append("</execution_result>")
+    return "\n".join(parts)
+
+
+def _format_block_results(results: list[ExecutionResult], total_blocks: int) -> str:
+    """Format per-block results for the next user message.
+
+    Reports how many blocks ran successfully out of how many were emitted
+    so the model can tell when execution stopped early on an error.
+    """
+    if not results:
+        return "<execution_result><stdout>(no blocks)</stdout></execution_result>"
+    if total_blocks == 1:
+        return _format_execution(results[0])
+    parts: list[str] = []
+    succeeded = sum(1 for r in results if r.error is None)
+    parts.append(f"<execution_summary blocks_run='{len(results)}' "
+                 f"blocks_emitted='{total_blocks}' "
+                 f"succeeded='{succeeded}'/>")
+    for i, r in enumerate(results, start=1):
+        parts.append(f"<block n='{i}'>")
+        body = _format_execution(r)
+        # Strip the outer <execution_result> wrapper for compactness
+        body = body.removeprefix("<execution_result>").removesuffix("</execution_result>").strip()
+        parts.append(body)
+        parts.append("</block>")
+    if len(results) < total_blocks:
+        parts.append(
+            f"<note>Stopped at block {len(results)} due to error; "
+            f"{total_blocks - len(results)} subsequent block(s) NOT executed. "
+            f"Next turn, address the failure before re-emitting them.</note>"
+        )
     return "\n".join(parts)
