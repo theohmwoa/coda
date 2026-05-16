@@ -125,11 +125,20 @@ class SubAgent:
         raw = resp.tool_calls[0].input
         try:
             result = self.return_type.model_validate(raw)
-        except ValidationError as e:
-            raise ValueError(
-                f"SubAgent {self.name!r} returned an object that failed "
-                f"{self.return_type.__name__} validation: {e}"
-            )
+        except ValidationError:
+            # Backends that fake forced tool-use via prompted JSON
+            # (ClaudeAgentSDKClient, ClaudeCodeClient) sometimes return
+            # nested lists/dicts as JSON-encoded STRINGS rather than
+            # native objects. Coerce them once and retry — this
+            # eliminates a large class of spurious validation failures
+            # that otherwise burn through retries (and rate limits).
+            try:
+                result = self.return_type.model_validate(_coerce_json_strings(raw))
+            except ValidationError as e:
+                raise ValueError(
+                    f"SubAgent {self.name!r} returned an object that failed "
+                    f"{self.return_type.__name__} validation: {e}"
+                )
         if self._hooks is not None:
             self._hooks.emit(
                 Event(
@@ -198,3 +207,32 @@ def _jsonable(v: Any) -> Any:
     if isinstance(v, (dict, list, str, int, float, bool)) or v is None:
         return v
     return repr(v)
+
+
+def _coerce_json_strings(obj: Any) -> Any:
+    """Recursively try to JSON-parse string values that look like JSON.
+
+    Used as a Pydantic-validation safety net. Some LLM backends (the ones
+    that fake forced tool-use via prompted JSON instead of Anthropic's
+    native tool-use schema enforcement) occasionally return nested
+    lists/dicts as JSON-encoded strings — e.g. `agreements: "[\"a\",\"b\"]"`
+    instead of `agreements: ["a", "b"]`. Without this, every such response
+    triggers a ValidationError and the agent retries (often hitting the
+    same model and the same mistake), wasting time and rate budget.
+
+    Conservative: only parses strings that already start with `[` or `{`,
+    silently keeps the original on parse failure.
+    """
+    if isinstance(obj, dict):
+        return {k: _coerce_json_strings(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_coerce_json_strings(x) for x in obj]
+    if isinstance(obj, str):
+        stripped = obj.strip()
+        if len(stripped) >= 2 and stripped[0] in "[{":
+            try:
+                parsed = json.loads(stripped)
+            except (json.JSONDecodeError, ValueError):
+                return obj
+            return _coerce_json_strings(parsed)
+    return obj

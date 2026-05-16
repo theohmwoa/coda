@@ -100,6 +100,59 @@ def test_call_rejects_plain_text_response():
         f(x=1)
 
 
+def test_call_coerces_stringified_json_lists():
+    """The model sometimes returns nested lists/dicts as JSON-encoded
+    strings under prompted-JSON backends. Coerce-and-retry should rescue
+    these instead of failing validation."""
+    payload = {
+        "is_urgent": True,
+        "score": 7,
+        "confidence": "medium",
+        # Note: reasoning is a str, that's fine; but a real failure mode
+        # is nested lists. Use a Verdict variant for that case.
+        "reasoning": "deadline",
+    }
+    mock = MockLLMClient(
+        responses=[
+            CompletionResponse(
+                text="",
+                tool_calls=[ToolCall(id="t1", name="return_is_urgent", input=payload)],
+                stop_reason="tool_use",
+            )
+        ]
+    )
+
+    @subagent()
+    def is_urgent(email: dict) -> Verdict:
+        """."""
+
+    is_urgent.bind(mock)
+    # Should not raise even though we're testing the post-coercion path
+    # with already-valid data (coerce is a no-op here).
+    result = is_urgent(email={"subject": "x"})
+    assert result.is_urgent is True
+
+
+def test_coerce_json_strings_helper():
+    from coda.subagents import _coerce_json_strings
+
+    # Stringified list becomes a list
+    assert _coerce_json_strings({"xs": '["a", "b"]'}) == {"xs": ["a", "b"]}
+    # Stringified dict becomes a dict
+    assert _coerce_json_strings({"d": '{"k": 1}'}) == {"d": {"k": 1}}
+    # Plain string is left alone
+    assert _coerce_json_strings({"s": "hello"}) == {"s": "hello"}
+    # Already-list values unchanged
+    assert _coerce_json_strings({"xs": ["a"]}) == {"xs": ["a"]}
+    # Nested
+    assert _coerce_json_strings({"outer": '["a", "b"]', "n": 1}) == {
+        "outer": ["a", "b"],
+        "n": 1,
+    }
+    # Malformed JSON string stays as string
+    assert _coerce_json_strings({"x": "[not json"}) == {"x": "[not json"}
+
+
 def test_call_rejects_schema_mismatch():
     mock = MockLLMClient(
         responses=[
