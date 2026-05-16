@@ -60,6 +60,12 @@ The agent will use `glob` to find Python files, `grep` to find TODOs, then call 
 
 The full runnable version is in [`examples/triage_todos.py`](examples/triage_todos.py). For an offline / CI-safe version with canned responses, see [`examples/scripted_demo.py`](examples/scripted_demo.py).
 
+### A harder end-to-end: on-call PR/issue triage
+
+[`examples/oncall_triage.py`](examples/oncall_triage.py) is a TheAgentCompany-shaped workflow: act as the on-call SWE for a real public repo (`anthropics/claude-agent-sdk-python`), pull every PR/issue updated in the last 7 days via the `gh` CLI, call a typed sub-agent on each one to assess severity / category / who-to-ping, write a grouped `TRIAGE.md`, and post a Discord summary via an inline `@tool` (URL kept in tool closure — never lands in LLM input). Latest sample run is checked in under [`examples/sample_run/`](examples/sample_run/) — `triage.md` is the rendered report and `trace.jsonl` is the full event log a debugger UI can replay.
+
+Verified live: 23 items triaged (1 critical / 9 high / 8 medium / 5 low), 9 main-agent turns, 23 sub-agent calls, 1,081 trace events, ~13 min wall time on a Pro plan via `ClaudeAgentSDKClient`.
+
 ### Adding an MCP server
 
 ```python

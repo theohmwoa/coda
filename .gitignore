@@ -21,6 +21,10 @@ traces/
 *.jsonl
 runs/
 
+# but DO keep the committed sample run that ships with the example
+!examples/sample_run/*.jsonl
+!examples/sample_run/*.md
+
 # Secrets
 .env
 .env.local
