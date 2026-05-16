@@ -66,6 +66,16 @@ The full runnable version is in [`examples/triage_todos.py`](examples/triage_tod
 
 Verified live: 23 items triaged (1 critical / 9 high / 8 medium / 5 low), 9 main-agent turns, 23 sub-agent calls, 1,081 trace events, ~13 min wall time on a Pro plan via `ClaudeAgentSDKClient`.
 
+### Dogfood: coda built its own replay CLI
+
+[`examples/dogfood_replay_cli.py`](examples/dogfood_replay_cli.py) spins up a coda Agent (Opus 4.7) against a clean copy of this very repo in a tempdir and asks it to add the missing `coda replay` CLI — read a JSONL trace, print a colored timeline, support filtering, ship with tests. Acceptance criterion: all existing tests still pass plus new tests cover ordering / filtering / color / file-not-found / CLI.
+
+Verified live: 3 main-agent turns, 10 min wall time, **123/123 tests passing** in the agent's sandbox; the files (`src/coda/replay.py`, `src/coda/__main__.py`, `tests/test_replay.py`) were merged into `main` after a human diff review. The dogfood run's full event log is at [`examples/sample_run/dogfood_trace.jsonl`](examples/sample_run/dogfood_trace.jsonl) — replay it with the CLI it itself produced:
+
+```bash
+python -m coda replay examples/sample_run/dogfood_trace.jsonl
+```
+
 ### Adding an MCP server
 
 ```python
@@ -181,12 +191,12 @@ What's in:
 - ~80-LoC Agent loop tying it all together.
 - Modular cache-aware prompt Assembler with 7 starter sections; `Assembler.preview(ctx)` for debugging.
 - TraceWriter (JSONL) + `read_trace` / `iter_trace`.
+- [x] Replay CLI — `python -m coda replay <trace.jsonl>`
 - 92 tests; ~0.2s suite time.
 - Two runnable examples (`triage_todos.py`, `scripted_demo.py`).
 
 Not yet:
 
-- Replay CLI (read a trace and step through it interactively).
 - `codetrace` web UI — the time-traveling debugger this whole library was scaffolding for.
 - Approval gates for destructive tools.
 - Multi-provider routing (OpenAI / local / per-tool model selection).

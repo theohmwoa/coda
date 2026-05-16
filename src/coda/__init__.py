@@ -16,6 +16,7 @@ from .llm import (
 )
 from .mcp import McpToolError, MCPRuntime, MCPServer, ServerProxy
 from .prompt import Assembler, Section, build_system_prompt, default_assembler
+from .replay import replay
 from .sandbox import ExecutionResult, Sandbox
 from .subagents import SubAgent, subagent
 from .tools import Tool, tool
@@ -46,6 +47,7 @@ __all__ = [
     "TraceWriter",
     "read_trace",
     "iter_trace",
+    "replay",
     "LLMClient",
     "Message",
     "CompletionResponse",

@@ -1,0 +1,17 @@
+{"ts": "2026-05-16T14:29:38.250086", "type": "llm_request", "payload": {"turn": 1, "messages": 1}}
+{"ts": "2026-05-16T14:29:43.373919", "type": "llm_response", "payload": {"turn": 1, "stop_reason": "end_turn", "text_len": 21}}
+{"ts": "2026-05-16T14:29:43.374175", "type": "code_emitted", "payload": {"code": "ls('.')"}}
+{"ts": "2026-05-16T14:29:43.374487", "type": "line_executed", "payload": {"lineno": 1}}
+{"ts": "2026-05-16T14:29:43.375336", "type": "tool_called", "payload": {"tool": "ls", "args": {"path": "."}, "result": {"count": 8}}}
+{"ts": "2026-05-16T14:29:43.375466", "type": "code_executed", "payload": {"lines": 1, "had_error": false, "stdout_len": 0}}
+{"ts": "2026-05-16T14:29:43.375514", "type": "turn_complete", "payload": {"turn": 1, "done": false}}
+{"ts": "2026-05-16T14:29:43.375542", "type": "llm_request", "payload": {"turn": 2, "messages": 3}}
+{"ts": "2026-05-16T14:39:43.566956", "type": "llm_response", "payload": {"turn": 2, "stop_reason": "tool_use", "text_len": 39899}}
+{"ts": "2026-05-16T14:39:43.568240", "type": "code_emitted", "payload": {"code": "print(ls('.'))"}}
+{"ts": "2026-05-16T14:39:43.568519", "type": "line_executed", "payload": {"lineno": 1}}
+{"ts": "2026-05-16T14:39:43.569356", "type": "tool_called", "payload": {"tool": "ls", "args": {"path": "."}, "result": {"count": 9}}}
+{"ts": "2026-05-16T14:39:43.569494", "type": "code_executed", "payload": {"lines": 1, "had_error": false, "stdout_len": 122}}
+{"ts": "2026-05-16T14:39:43.569546", "type": "turn_complete", "payload": {"turn": 2, "done": false}}
+{"ts": "2026-05-16T14:39:43.569566", "type": "llm_request", "payload": {"turn": 3, "messages": 5}}
+{"ts": "2026-05-16T14:39:53.694792", "type": "llm_response", "payload": {"turn": 3, "stop_reason": "end_turn", "text_len": 167}}
+{"ts": "2026-05-16T14:39:53.695663", "type": "turn_complete", "payload": {"turn": 3, "done": true}}
