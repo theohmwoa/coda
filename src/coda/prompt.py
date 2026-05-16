@@ -30,6 +30,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from .mcp import ServerProxy
 from .subagents import SubAgent
 from .tools import Tool
 
@@ -211,6 +212,30 @@ def _subagents(ctx: Context) -> str:
     return "\n".join(lines)
 
 
+def _mcp(ctx: Context) -> str:
+    proxies: dict[str, ServerProxy] = ctx["mcp_proxies"]
+    lines = [
+        "## MCP servers available\n",
+        "Each MCP server is exposed in the sandbox as a Python object. Call its "
+        "tools as normal method calls — no JSON tool-use, no schemas. Argument "
+        "names match the MCP tool's input schema; pass them as keyword args.\n",
+    ]
+    for py_name, proxy in proxies.items():
+        tools = proxy.list_tools()
+        lines.append(f"### `{py_name}` ({len(tools)} tool(s))")
+        for tool_name in tools:
+            meta = proxy.describe(tool_name)
+            doc_first = (meta["description"].splitlines()[0] if meta["description"] else "").strip()
+            schema_keys = list((meta["input_schema"].get("properties") or {}).keys())
+            args_hint = ", ".join(schema_keys) if schema_keys else ""
+            lines.append(f"- `{py_name}.{tool_name}({args_hint})` — {doc_first}")
+    lines.append(
+        "\nFor full input-schema details on any tool, call "
+        "`<server>.describe('<tool>')` from your code."
+    )
+    return "\n".join(lines)
+
+
 def _extra(ctx: Context) -> str:
     return ctx["extra"]
 
@@ -264,6 +289,14 @@ def default_assembler() -> Assembler:
     )
     a.add(
         Section(
+            "mcp",
+            render=_mcp,
+            cache_stable=False,
+            condition=lambda ctx: bool(ctx.get("mcp_proxies")),
+        )
+    )
+    a.add(
+        Section(
             "extra",
             render=_extra,
             cache_stable=False,
@@ -280,6 +313,7 @@ def build_system_prompt(
     tools_dir: str | None = None,
     extra: str | None = None,
     assembler: Assembler | None = None,
+    mcp_proxies: dict[str, "ServerProxy"] | None = None,
 ) -> str:
     """Shortcut: build the default Assembler and render it against a context.
 
@@ -294,6 +328,7 @@ def build_system_prompt(
         "subagents": list(subagents or []),
         "tools_dir": tools_dir,
         "extra": extra,
+        "mcp_proxies": dict(mcp_proxies or {}),
     }
     a = assembler or default_assembler()
     return a.render(ctx)

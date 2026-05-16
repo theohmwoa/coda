@@ -14,6 +14,7 @@ from .llm import (
     ToolChoice,
     ToolSchema,
 )
+from .mcp import McpToolError, MCPRuntime, MCPServer, ServerProxy
 from .prompt import Assembler, Section, build_system_prompt, default_assembler
 from .sandbox import ExecutionResult, Sandbox
 from .subagents import SubAgent, subagent
@@ -38,6 +39,10 @@ __all__ = [
     "default_assembler",
     "Assembler",
     "Section",
+    "MCPServer",
+    "MCPRuntime",
+    "ServerProxy",
+    "McpToolError",
     "TraceWriter",
     "read_trace",
     "iter_trace",

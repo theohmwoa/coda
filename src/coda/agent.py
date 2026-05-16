@@ -22,6 +22,7 @@ from typing import Any
 
 from .hooks import Event, HookRegistry
 from .llm import LLMClient, Message
+from .mcp import MCPRuntime, MCPServer, ServerProxy, register_for_atexit
 from .prompt import Assembler, build_system_prompt, default_assembler
 from .sandbox import ExecutionResult, Sandbox
 from .subagents import SubAgent
@@ -54,6 +55,7 @@ class Agent:
         hooks: HookRegistry | None = None,
         tools: list[Tool] | None = None,
         subagents: list[SubAgent] | None = None,
+        mcp_servers: list[MCPServer] | None = None,
         tools_dir: str | None = None,
         system_prompt: str | None = None,
         system_prompt_append: str | None = None,
@@ -77,6 +79,16 @@ class Agent:
         for t in self.tools:
             self.sandbox.inject(t.name, t)
 
+        self.mcp_runtime: MCPRuntime | None = None
+        self.mcp_proxies: dict[str, ServerProxy] = {}
+        if mcp_servers:
+            self.mcp_runtime = MCPRuntime()
+            self.mcp_runtime.start(list(mcp_servers))
+            register_for_atexit(self.mcp_runtime)
+            self.mcp_proxies = self.mcp_runtime.proxies()
+            for py_name, proxy in self.mcp_proxies.items():
+                self.sandbox.inject(py_name, proxy)
+
         self.prompt_assembler = prompt_assembler or default_assembler()
         if system_prompt is not None:
             self._system_prompt = system_prompt
@@ -87,6 +99,7 @@ class Agent:
                 tools_dir=self.tools_dir,
                 extra=system_prompt_append,
                 assembler=self.prompt_assembler,
+                mcp_proxies=self.mcp_proxies,
             )
 
     @property
@@ -154,6 +167,17 @@ class Agent:
             input_tokens=in_tokens,
             output_tokens=out_tokens,
         )
+
+    def close(self) -> None:
+        """Shut down owned MCP servers. Idempotent."""
+        if self.mcp_runtime is not None:
+            self.mcp_runtime.stop()
+
+    def __enter__(self) -> "Agent":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
 
 
 def _extract_code_block(text: str) -> str | None:

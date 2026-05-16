@@ -11,6 +11,7 @@
 - **JSONL trace writer.** `coda.TraceWriter` attaches to a `HookRegistry` and streams every event to a JSONL file. The wire format the future debugger UI will replay.
 - **Pluggable LLM backend.** Four backends ship: `MockLLMClient` (tests / canned demos), `ClaudeCodeClient` (`claude -p` subprocess — billed to your Claude plan today), `ClaudeAgentSDKClient` (official `claude-agent-sdk` Python package — same subscription billing, no subprocess fork per call), `AnthropicClient` (direct SDK, API-key billed).
 - **Cache-aware prompt assembler.** Sections are marked cache-stable or cache-breaking and rendered in that order, so adding a tool invalidates only the prompt suffix.
+- **MCP servers as Python objects.** Connect a stdio MCP server (gmail, slack, github, filesystem, anything from the registry) and every tool it exposes becomes a method on a sandbox global — the model writes `gmail.list_unread(label="INBOX")`, not JSON tool-use blocks. The MirageAI "tools are code, not protocol" pattern, adapted to MCP.
 
 ## Install
 
@@ -58,6 +59,27 @@ print(result.text)
 The agent will use `glob` to find Python files, `grep` to find TODOs, then call `triage(...)` inside a `for` loop — one fresh-context LLM call per item, each returning a validated `Triage`. Finally it calls `write("triage.md", ...)`.
 
 The full runnable version is in [`examples/triage_todos.py`](examples/triage_todos.py). For an offline / CI-safe version with canned responses, see [`examples/scripted_demo.py`](examples/scripted_demo.py).
+
+### Adding an MCP server
+
+```python
+import coda
+
+with coda.Agent(
+    model="claude-sonnet-4-6",
+    llm=coda.ClaudeAgentSDKClient(),
+    mcp_servers=[
+        coda.MCPServer.stdio(
+            "everything",
+            command="npx",
+            args=["-y", "@modelcontextprotocol/server-everything"],
+        ),
+    ],
+) as agent:
+    result = agent.run("Use everything.get_sum to add 2 and 40, then echo the answer.")
+```
+
+Each MCP server connects on `Agent` construction; its tools are listed in the system prompt's MCP section and injected into the sandbox as a Python object. The model writes `everything.echo(message="hi")` — not JSON tool-use. Hyphenated MCP tool names (`get-env`) are sanitized to Python identifiers (`get_env`). Use the `Agent` as a context manager so stdio subprocesses are closed cleanly.
 
 ## Origin
 
