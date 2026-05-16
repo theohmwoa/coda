@@ -122,10 +122,16 @@ def post_to_discord(message: str) -> dict:
     if not WEBHOOK_URL:
         return {"status": 0, "ok": False, "error": "DISCORD_WEBHOOK_URL not set"}
     payload = _json.dumps({"content": message[:1900]}).encode("utf-8")
+    # Cloudflare in front of discord.com blocks the default Python User-Agent
+    # (urllib/3.x) with HTTP 403 + error code 1010. Setting any non-default UA
+    # bypasses the block; curl works for the same reason.
     req = urllib.request.Request(
         WEBHOOK_URL,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "coda-oncall/0.1 (+https://github.com/theohmwoa/coda)",
+        },
     )
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
