@@ -163,8 +163,13 @@ def _primitives(ctx: Context) -> str:
 def _output_format(ctx: Context) -> str:
     return (
         "## Output format\n\n"
-        "When you have code to run, wrap it in a fenced block:\n\n"
+        "When you have code to run, wrap each chunk in a fenced block:\n\n"
         f"{CODE_FENCE}python\n# your code\n{CODE_FENCE}\n\n"
+        "You may emit MULTIPLE code blocks per turn — they all run in "
+        "order against the same persistent sandbox, sharing globals. "
+        "Prefer one block per turn when you want to react to its output "
+        "before the next chunk; emit several when later chunks don't "
+        "depend on earlier results (e.g. parallel data gathering).\n\n"
         "When the task is complete, reply with prose only (no code block) — "
         "that ends the loop."
     )

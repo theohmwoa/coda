@@ -136,8 +136,8 @@ class Agent:
             )
             messages.append(Message(role="assistant", content=resp.text))
 
-            code = _extract_code_block(resp.text)
-            if code is None:
+            blocks = _extract_code_blocks(resp.text)
+            if not blocks:
                 self.hooks.emit(
                     Event(type="turn_complete", payload={"turn": turn, "done": True})
                 )
@@ -150,12 +150,23 @@ class Agent:
                     output_tokens=out_tokens,
                 )
 
+            # Concatenate every fenced code block in this turn into one exec.
+            # Backends that wrap Claude Code's own loop (ClaudeAgentSDKClient,
+            # ClaudeCodeClient) tend to emit several code blocks per response,
+            # interleaved with prose narration. Running only the first would
+            # silently drop the rest and the agent would falsely believe the
+            # work succeeded. They share globals anyway, so concat-and-exec
+            # preserves their ordering and any cross-block state.
+            code = "\n\n# --- next block ---\n\n".join(blocks)
             result = self.sandbox.execute(code)
             executions.append(result)
             feedback = _format_execution(result)
             messages.append(Message(role="user", content=feedback))
             self.hooks.emit(
-                Event(type="turn_complete", payload={"turn": turn, "done": False})
+                Event(
+                    type="turn_complete",
+                    payload={"turn": turn, "done": False, "blocks": len(blocks)},
+                )
             )
 
         final_text = messages[-1].content if messages else ""
@@ -180,16 +191,19 @@ class Agent:
         self.close()
 
 
+def _extract_code_blocks(text: str) -> list[str]:
+    """Return every Python code block in `text`, in order. Empty list if none."""
+    return [m.group(1).rstrip() for m in CODE_BLOCK_RE.finditer(text)]
+
+
 def _extract_code_block(text: str) -> str | None:
     """Return the first Python code block in `text`, or None if none.
 
-    We deliberately take only ONE block per turn: turns stay small, errors
-    stay localized, and the model can react to each result before continuing.
+    Kept for backward compatibility with callers that only wanted one block.
+    New code should use `_extract_code_blocks` (plural).
     """
-    m = CODE_BLOCK_RE.search(text)
-    if m is None:
-        return None
-    return m.group(1).rstrip()
+    blocks = _extract_code_blocks(text)
+    return blocks[0] if blocks else None
 
 
 def _format_execution(result: ExecutionResult) -> str:
