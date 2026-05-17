@@ -171,6 +171,14 @@ def _output_format(ctx: Context) -> str:
         "Prefer one block per turn when you want to react to its output "
         "before the next chunk; emit several when later chunks don't "
         "depend on earlier results (e.g. parallel data gathering).\n\n"
+        "After your code runs, the response may contain a "
+        "`⚠️ Lint warnings` section. **These are real bugs caught by "
+        "static analysis against the typed sub-agent schemas** — e.g. "
+        "you wrote `x.severity == 'medium'` but the sub-agent's "
+        "`severity` is `Literal['low','high']`, so the branch is dead "
+        "code. When you see lint warnings, your NEXT code block must "
+        "fix them before continuing the workflow. Do not save such code "
+        "as a skill until clean.\n\n"
         "When the task is complete, reply with prose only (no code block) — "
         "that ends the loop."
     )
@@ -284,8 +292,13 @@ def _skills(ctx: Context) -> str:
         "''')\n"
         "```\n\n"
         "After saving, the skill is available in your NEXT run with this "
-        "same `skills_dir`. The save itself returns "
-        "`{ok: True, path: ..., name: ...}` so you can verify."
+        "same `skills_dir`. The save returns "
+        "`{ok: True, path: ..., name: ...}`. If lint warnings appeared "
+        "in your earlier execution results, you should have fixed them "
+        "BEFORE saving — saved skills shouldn't carry dead branches.\n\n"
+        "You also have a `lint(code: str)` primitive for an explicit "
+        "check on any snippet (the same check that runs automatically "
+        "on every executed block)."
     )
     return "\n".join(lines)
 

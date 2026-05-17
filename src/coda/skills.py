@@ -202,9 +202,20 @@ def save_skill(*, code: str, directory: str | Path) -> dict[str, Any]:
     return {"ok": True, "path": str(out_path), "name": name}
 
 
-def make_save_skill(directory: str | Path) -> Callable[..., dict[str, Any]]:
-    """Build a sandbox-injectable `save_skill(code: str) -> dict` bound to a directory."""
+def make_save_skill(
+    directory: str | Path,
+    *,
+    schemas: dict[str, Any] | None = None,
+) -> Callable[..., dict[str, Any]]:
+    """Build a sandbox-injectable `save_skill(code: str) -> dict` bound to a directory.
+
+    If `schemas` is given (typically `{sub_agent_name: return_type}`
+    pulled from `Agent.subagents`), every successful save is also
+    AST-linted against those schemas and any findings come back in the
+    response under `warnings`. The agent decides whether to revise.
+    """
     bound_dir = directory
+    bound_schemas = schemas
 
     def _save_skill(*, code: str) -> dict[str, Any]:
         """Save the given Python function source as a reusable skill.
@@ -215,11 +226,25 @@ def make_save_skill(directory: str | Path) -> Callable[..., dict[str, Any]]:
         `gmail` or `slack`, sub-agents, native primitives like `read`
         and `bash`). Existing skills with the same name are overwritten.
 
-        Returns `{"ok": True, "path": ..., "name": ...}` or
-        `{"ok": False, "error": ...}`. Saved skills are available
-        immediately in the NEXT run with the same `skills_dir`.
+        Returns `{"ok": True, "path": ..., "name": ...}` on success,
+        possibly with a `warnings` key listing structural issues (e.g.
+        comparisons against string values not in a typed sub-agent's
+        Literal schema — dead-branch bugs). Returns
+        `{"ok": False, "error": ...}` on validation failure.
+
+        Saved skills are available immediately in the NEXT run with the
+        same `skills_dir`.
         """
-        return save_skill(code=code, directory=bound_dir)
+        result = save_skill(code=code, directory=bound_dir)
+        if result.get("ok") and bound_schemas:
+            # Lazy import — avoids forcing pydantic on coda users who
+            # only ever construct Agents without sub-agents.
+            from .lint import lint_dicts
+
+            warnings = lint_dicts(code, schemas=bound_schemas)
+            if warnings:
+                result["warnings"] = warnings
+        return result
 
     _save_skill.__name__ = "save_skill"
     return _save_skill

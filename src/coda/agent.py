@@ -82,6 +82,12 @@ class Agent:
         for t in self.tools:
             self.sandbox.inject(t.name, t)
 
+        # Schemas used by the per-turn linter. Built once from the live
+        # sub-agents so it doesn't matter whether skills_dir is set.
+        self._lint_schemas: dict[str, Any] = {
+            sa.name: sa.return_type for sa in self.subagents
+        }
+
         self.mcp_runtime: MCPRuntime | None = None
         self.mcp_proxies: dict[str, ServerProxy] = {}
         if mcp_servers:
@@ -100,8 +106,30 @@ class Agent:
             self.skills_dir.mkdir(parents=True, exist_ok=True)
             self.skills = load_skills(self.skills_dir)
             inject_skills(self.sandbox.globals, self.skills)
-            # The agent itself can crystallize new skills mid-run.
-            self.sandbox.inject("save_skill", make_save_skill(self.skills_dir))
+            self.sandbox.inject(
+                "save_skill",
+                make_save_skill(self.skills_dir, schemas=self._lint_schemas or None),
+            )
+
+        # Expose `lint` as a sandbox primitive whenever there are
+        # sub-agents, regardless of whether skills_dir is set. Lets the
+        # agent run an extra check at any point in a workflow.
+        if self._lint_schemas:
+            from .lint import lint_dicts as _lint_dicts
+            _schemas = self._lint_schemas
+            def _lint(code: str) -> list[dict]:
+                """Lint Python code against the live sub-agent schemas.
+
+                Catches comparisons of `x.field == "value"` or
+                `x["field"] == "value"` where `field` is a Literal-typed
+                field on some sub-agent's return type and `"value"` isn't
+                in the allowed set (dead-branch bugs). The Agent already
+                runs this automatically on every emitted code block and
+                surfaces findings in the execution result; this primitive
+                is for explicit one-off checks.
+                """
+                return _lint_dicts(code, schemas=_schemas)
+            self.sandbox.inject("lint", _lint)
 
         self.prompt_assembler = prompt_assembler or default_assembler()
         if system_prompt is not None:
@@ -175,7 +203,20 @@ class Agent:
             # bit us in framework_compare when one block had stray markdown
             # em-dashes and erased all the prior assess() sub-agent results.
             block_results: list[ExecutionResult] = []
+            lint_findings: list[dict] = []
             for i, block in enumerate(blocks, start=1):
+                # Lint BEFORE / alongside execution so warnings come back
+                # in the same turn that produced the code. The agent is
+                # told to fix lint findings in the next turn before
+                # continuing — that's the whole point of this surface:
+                # catch dead-code bugs the moment they're written, not
+                # after the buggy code is saved into a skill.
+                if self._lint_schemas:
+                    from .lint import lint_dicts
+                    for f in lint_dicts(block, schemas=self._lint_schemas):
+                        if len(blocks) > 1:
+                            f["block"] = i
+                        lint_findings.append(f)
                 r = self.sandbox.execute(block)
                 block_results.append(r)
                 executions.append(r)
@@ -184,7 +225,11 @@ class Agent:
                     # in feedback and decide what to do next turn. Subsequent
                     # blocks would likely depend on this one's state.
                     break
-            feedback = _format_block_results(block_results, total_blocks=len(blocks))
+            feedback = _format_block_results(
+                block_results,
+                total_blocks=len(blocks),
+                lint_findings=lint_findings,
+            )
             messages.append(Message(role="user", content=feedback))
             self.hooks.emit(
                 Event(
@@ -246,32 +291,47 @@ def _format_execution(result: ExecutionResult) -> str:
     return "\n".join(parts)
 
 
-def _format_block_results(results: list[ExecutionResult], total_blocks: int) -> str:
+def _format_block_results(
+    results: list[ExecutionResult],
+    total_blocks: int,
+    lint_findings: list[dict] | None = None,
+) -> str:
     """Format per-block results for the next user message.
 
     Reports how many blocks ran successfully out of how many were emitted
     so the model can tell when execution stopped early on an error.
+    Appends a ⚠️ lint section if `lint_findings` is non-empty so the
+    agent sees code-quality warnings inline with execution output.
     """
     if not results:
-        return "<execution_result><stdout>(no blocks)</stdout></execution_result>"
-    if total_blocks == 1:
-        return _format_execution(results[0])
-    parts: list[str] = []
-    succeeded = sum(1 for r in results if r.error is None)
-    parts.append(f"<execution_summary blocks_run='{len(results)}' "
-                 f"blocks_emitted='{total_blocks}' "
-                 f"succeeded='{succeeded}'/>")
-    for i, r in enumerate(results, start=1):
-        parts.append(f"<block n='{i}'>")
-        body = _format_execution(r)
-        # Strip the outer <execution_result> wrapper for compactness
-        body = body.removeprefix("<execution_result>").removesuffix("</execution_result>").strip()
-        parts.append(body)
-        parts.append("</block>")
-    if len(results) < total_blocks:
-        parts.append(
-            f"<note>Stopped at block {len(results)} due to error; "
-            f"{total_blocks - len(results)} subsequent block(s) NOT executed. "
-            f"Next turn, address the failure before re-emitting them.</note>"
-        )
-    return "\n".join(parts)
+        body = "<execution_result><stdout>(no blocks)</stdout></execution_result>"
+    elif total_blocks == 1:
+        body = _format_execution(results[0])
+    else:
+        parts: list[str] = []
+        succeeded = sum(1 for r in results if r.error is None)
+        parts.append(f"<execution_summary blocks_run='{len(results)}' "
+                     f"blocks_emitted='{total_blocks}' "
+                     f"succeeded='{succeeded}'/>")
+        for i, r in enumerate(results, start=1):
+            parts.append(f"<block n='{i}'>")
+            sub = _format_execution(r)
+            sub = sub.removeprefix("<execution_result>").removesuffix("</execution_result>").strip()
+            parts.append(sub)
+            parts.append("</block>")
+        if len(results) < total_blocks:
+            parts.append(
+                f"<note>Stopped at block {len(results)} due to error; "
+                f"{total_blocks - len(results)} subsequent block(s) NOT executed. "
+                f"Next turn, address the failure before re-emitting them.</note>"
+            )
+        body = "\n".join(parts)
+
+    if lint_findings:
+        lint_lines = ["", "⚠️ Lint warnings (likely real bugs — fix in your next code block before continuing):"]
+        for f in lint_findings:
+            block_prefix = f"block {f['block']}, " if "block" in f else ""
+            lint_lines.append(f"  - {block_prefix}{f.get('message', f)}")
+        body = body + "\n" + "\n".join(lint_lines)
+
+    return body
