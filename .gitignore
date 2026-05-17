@@ -43,3 +43,10 @@ Thumbs.db
 
 # Claude Code session state
 .claude/
+
+# UI build / Node
+app/node_modules/
+app/dist/
+# but DO ship the built UI bundle so `python -m coda serve` works
+# out of a fresh `pip install -e .` without needing Node.
+# src/coda/static/app/ is intentionally NOT ignored.
