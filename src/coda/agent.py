@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .hooks import Event, HookRegistry
@@ -25,6 +26,7 @@ from .llm import LLMClient, Message
 from .mcp import MCPRuntime, MCPServer, ServerProxy, register_for_atexit
 from .prompt import Assembler, build_system_prompt, default_assembler
 from .sandbox import ExecutionResult, Sandbox
+from .skills import Skill, inject_skills, load_skills, make_save_skill
 from .subagents import SubAgent
 from .tools import Tool
 
@@ -57,6 +59,7 @@ class Agent:
         subagents: list[SubAgent] | None = None,
         mcp_servers: list[MCPServer] | None = None,
         tools_dir: str | None = None,
+        skills_dir: str | Path | None = None,
         system_prompt: str | None = None,
         system_prompt_append: str | None = None,
         prompt_assembler: Assembler | None = None,
@@ -89,6 +92,17 @@ class Agent:
             for py_name, proxy in self.mcp_proxies.items():
                 self.sandbox.inject(py_name, proxy)
 
+        self.skills_dir: Path | None = (
+            Path(skills_dir).resolve() if skills_dir else None
+        )
+        self.skills: dict[str, Skill] = {}
+        if self.skills_dir is not None:
+            self.skills_dir.mkdir(parents=True, exist_ok=True)
+            self.skills = load_skills(self.skills_dir)
+            inject_skills(self.sandbox.globals, self.skills)
+            # The agent itself can crystallize new skills mid-run.
+            self.sandbox.inject("save_skill", make_save_skill(self.skills_dir))
+
         self.prompt_assembler = prompt_assembler or default_assembler()
         if system_prompt is not None:
             self._system_prompt = system_prompt
@@ -100,6 +114,8 @@ class Agent:
                 extra=system_prompt_append,
                 assembler=self.prompt_assembler,
                 mcp_proxies=self.mcp_proxies,
+                skills=self.skills,
+                skills_dir=self.skills_dir,
             )
 
     @property

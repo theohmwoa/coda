@@ -18,6 +18,7 @@ from .mcp import McpToolError, MCPRuntime, MCPServer, ServerProxy
 from .prompt import Assembler, Section, build_system_prompt, default_assembler
 from .replay import replay
 from .sandbox import ExecutionResult, Sandbox
+from .skills import Skill, load_skills, save_skill
 from .subagents import SubAgent, subagent
 from .tools import Tool, tool
 from .trace import TraceWriter, iter_trace, read_trace
@@ -44,6 +45,9 @@ __all__ = [
     "MCPRuntime",
     "ServerProxy",
     "McpToolError",
+    "Skill",
+    "load_skills",
+    "save_skill",
     "TraceWriter",
     "read_trace",
     "iter_trace",

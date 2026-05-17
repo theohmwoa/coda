@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .mcp import ServerProxy
+from .skills import Skill
 from .subagents import SubAgent
 from .tools import Tool
 
@@ -241,6 +242,54 @@ def _mcp(ctx: Context) -> str:
     return "\n".join(lines)
 
 
+def _skills(ctx: Context) -> str:
+    skills: dict[str, Skill] = ctx["skills"]
+    skills_dir = ctx["skills_dir"]
+    lines = [
+        "## Your skills library\n",
+        "Previously-saved workflows live in `" + str(skills_dir) + "`. "
+        "Each is a Python function loaded into your sandbox globals at "
+        "this run's startup. Call them by name — no import needed.",
+    ]
+    if skills:
+        lines.append("\nCurrently available:")
+        for s in skills.values():
+            sig = s.signature.replace("\n", " ")
+            doc_first = s.docstring.splitlines()[0] if s.docstring else ""
+            lines.append(f"- `{s.name}{sig}` — {doc_first}")
+    else:
+        lines.append("\n(The library is empty so far. Anything you save below will be available in your next run.)")
+    lines.append("")
+    lines.append(
+        "### Saving new skills — IMPORTANT\n"
+        "You have `save_skill(code=...)` in your globals. **When you've "
+        "just successfully completed a workflow whose code would work "
+        "again on a similar task with different inputs, call `save_skill` "
+        "to crystallize it.** The harness doesn't do this for you; you "
+        "decide what's worth keeping.\n\n"
+        "Pass `code` containing EXACTLY ONE top-level `def` whose name "
+        "is snake_case. Parameterize anything that was task-specific in "
+        "the run you just did (hardcoded names, paths, time windows). "
+        "The function body may reference any sandbox global you used "
+        "this run (MCP proxies like `gmail`, sub-agents, primitives like "
+        "`read`/`write`). Skills are versionless — saving with the same "
+        "name overwrites. Save aggressively for useful work, skip "
+        "trivial one-offs like `print(ls('.'))`. Example:\n\n"
+        "```python\n"
+        "save_skill(code='''\n"
+        "def brief_vips(vips: list[str], hours: int = 24) -> str:\n"
+        "    \"\"\"Return a markdown brief of Gmail messages from VIPs in the last N hours.\"\"\"\n"
+        "    msgs = gmail.search(query=f\"from:({' OR '.join(vips)}) newer_than:{hours}h\")\n"
+        "    return '\\n'.join(f'- {m[\"from\"]}: {m[\"subject\"]}' for m in msgs)\n"
+        "''')\n"
+        "```\n\n"
+        "After saving, the skill is available in your NEXT run with this "
+        "same `skills_dir`. The save itself returns "
+        "`{ok: True, path: ..., name: ...}` so you can verify."
+    )
+    return "\n".join(lines)
+
+
 def _extra(ctx: Context) -> str:
     return ctx["extra"]
 
@@ -302,6 +351,14 @@ def default_assembler() -> Assembler:
     )
     a.add(
         Section(
+            "skills",
+            render=_skills,
+            cache_stable=False,
+            condition=lambda ctx: ctx.get("skills_dir") is not None,
+        )
+    )
+    a.add(
+        Section(
             "extra",
             render=_extra,
             cache_stable=False,
@@ -319,6 +376,8 @@ def build_system_prompt(
     extra: str | None = None,
     assembler: Assembler | None = None,
     mcp_proxies: dict[str, "ServerProxy"] | None = None,
+    skills: dict[str, Skill] | None = None,
+    skills_dir: Any = None,
 ) -> str:
     """Shortcut: build the default Assembler and render it against a context.
 
@@ -334,6 +393,8 @@ def build_system_prompt(
         "tools_dir": tools_dir,
         "extra": extra,
         "mcp_proxies": dict(mcp_proxies or {}),
+        "skills": dict(skills or {}),
+        "skills_dir": skills_dir,
     }
     a = assembler or default_assembler()
     return a.render(ctx)
