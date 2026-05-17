@@ -37,6 +37,10 @@ agent-sdk = [
 mcp = [
     "mcp>=1.0",
 ]
+server = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+]
 
 [project.urls]
 Homepage = "https://github.com/theohmwoa/coda"
@@ -44,6 +48,9 @@ Issues = "https://github.com/theohmwoa/coda/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/coda"]
+
+[tool.hatch.build.targets.wheel.shared-data]
+"src/coda/static" = "coda/static"
 
 [tool.ruff]
 line-length = 100

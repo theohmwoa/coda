@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>coda — live</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+<style>
+  /* layout — three columns: chat | code stream | events */
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel2: #1f2630;
+    --border: #30363d;
+    --fg: #e6edf3;
+    --fg-dim: #8d96a0;
+    --accent: #7ee787;
+    --warn: #f0883e;
+    --err: #ff7b72;
+    --code-bg: #0d1117;
+    --tool: #79c0ff;
+    --sub: #d2a8ff;
+    --line-hl: rgba(126, 231, 135, 0.20);
+    --line-flash: rgba(255, 215, 89, 0.55);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, "Inter", "SF Pro Text", "Segoe UI", sans-serif;
+    font-size: 14px; line-height: 1.45;
+  }
+  body { display: grid; grid-template-columns: 360px 1fr 380px; height: 100vh; overflow: hidden; }
+  .panel { background: var(--panel); border-right: 1px solid var(--border); display: flex; flex-direction: column; min-height: 0; }
+  .panel:last-child { border-right: none; }
+  .panel-header { padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--panel2);
+    font-weight: 600; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--fg-dim);
+    display: flex; align-items: center; gap: 10px; }
+  .panel-header .meta { font-weight: 400; margin-left: auto; font-size: 11px; color: var(--fg-dim); text-transform: none; letter-spacing: 0; }
+  .panel-body { flex: 1; overflow: auto; padding: 12px 14px; }
+  .panel-foot { padding: 10px 14px; border-top: 1px solid var(--border); background: var(--panel2); }
+
+  /* chat panel */
+  #chat-input {
+    width: 100%; background: var(--code-bg); color: var(--fg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 8px 10px; font-family: -apple-system, "Inter", sans-serif; font-size: 14px;
+    resize: vertical; min-height: 60px; max-height: 240px; outline: none;
+  }
+  #chat-input:focus { border-color: var(--accent); }
+  .send-row { display: flex; gap: 8px; margin-top: 8px; }
+  .send-row button { flex: 1; padding: 6px 10px; background: var(--accent); color: #061812; border: 0;
+    border-radius: 6px; font-weight: 600; cursor: pointer; }
+  .send-row button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .send-row .secondary { flex: 0 0 auto; background: var(--panel2); color: var(--fg-dim); }
+  .msg { padding: 10px 12px; border-radius: 6px; margin-bottom: 10px; word-wrap: break-word; }
+  .msg.user { background: var(--panel2); border-left: 2px solid var(--tool); }
+  .msg.agent { background: var(--code-bg); border-left: 2px solid var(--accent); white-space: pre-wrap; }
+  .msg.error { background: rgba(255, 123, 114, 0.10); border-left: 2px solid var(--err); white-space: pre-wrap;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+  .msg-role { font-size: 11px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 4px; }
+
+  /* code panel */
+  .code-block {
+    background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px;
+    margin-bottom: 14px; overflow: hidden;
+  }
+  .code-block .code-head {
+    display: flex; align-items: center; padding: 6px 10px; background: var(--panel2);
+    border-bottom: 1px solid var(--border); font-size: 12px; color: var(--fg-dim);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .code-block .code-head .badge { background: var(--bg); padding: 1px 6px; border-radius: 3px;
+    color: var(--accent); margin-left: auto; font-size: 11px; }
+  .code-block.had-error .code-head .badge { color: var(--err); }
+  .code-block pre {
+    margin: 0; padding: 0; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12.5px; line-height: 1.55; counter-reset: line; overflow: auto;
+  }
+  .code-block pre code { display: block; }
+  .code-line {
+    display: flex; padding: 0 12px; min-height: 18.5px; transition: background-color 0.4s;
+  }
+  .code-line .ln {
+    width: 30px; flex: 0 0 30px; text-align: right; padding-right: 10px;
+    color: #4a525c; user-select: none;
+  }
+  .code-line .src { flex: 1; white-space: pre; }
+  .code-line.executed { background: var(--line-hl); }
+  .code-line.flashing { background: var(--line-flash) !important; }
+
+  .stdout, .stderr, .err {
+    margin: 0; padding: 8px 12px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 12px; white-space: pre-wrap; border-top: 1px solid var(--border);
+  }
+  .stdout { color: #b1bac4; }
+  .stderr { color: var(--warn); }
+  .err { color: var(--err); background: rgba(255, 123, 114, 0.05); }
+  .lint {
+    margin: 0; padding: 8px 12px; background: rgba(240, 136, 62, 0.08); color: var(--warn);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; white-space: pre-wrap;
+    border-top: 1px solid var(--border);
+  }
+
+  /* events panel */
+  .event {
+    padding: 7px 10px; border-bottom: 1px solid var(--border); font-size: 12px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; line-height: 1.5;
+  }
+  .event .ts { color: var(--fg-dim); font-size: 11px; }
+  .event .badge {
+    display: inline-block; padding: 1px 6px; border-radius: 3px;
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 6px;
+    background: var(--bg); color: var(--fg-dim);
+  }
+  .event.tool_called .badge { color: var(--tool); }
+  .event.subagent_called .badge { color: var(--sub); }
+  .event.subagent_returned .badge { color: var(--sub); }
+  .event.llm_request .badge, .event.llm_response .badge { color: #9bd1ff; }
+  .event.code_emitted .badge { color: var(--accent); }
+  .event.execution_error .badge { color: var(--err); }
+  .event .body { color: var(--fg); white-space: pre-wrap; word-break: break-word; }
+  .event .args { color: var(--fg-dim); font-size: 11px; margin-top: 2px; }
+
+  /* status bar */
+  .status-bar {
+    padding: 8px 14px; background: var(--panel2); border-top: 1px solid var(--border);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: var(--fg-dim);
+    display: flex; gap: 16px;
+  }
+  .status-bar .item { display: flex; gap: 4px; }
+  .status-bar .item b { color: var(--fg); font-weight: 600; }
+  .status-bar .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--fg-dim); }
+  .status-bar .dot.live { background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+  .runtime-list { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+  .runtime-list .chip {
+    padding: 1px 6px; border-radius: 10px; background: var(--panel2); color: var(--fg-dim);
+    font-size: 10px; font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  .runtime-list .chip.mcp { color: var(--tool); }
+  .runtime-list .chip.sub { color: var(--sub); }
+  .runtime-list .chip.skill { color: var(--accent); }
+  h3.section { font-size: 11px; color: var(--fg-dim); text-transform: uppercase; letter-spacing: 0.06em;
+    margin: 8px 0 4px; font-weight: 600; }
+</style>
+</head>
+<body>
+
+<!-- ─── chat ─────────────────────────────────────────────────────────── -->
+<section class="panel">
+  <div class="panel-header">
+    Chat <span class="meta" id="status-meta">disconnected</span>
+  </div>
+  <div class="panel-body" id="chat-log"></div>
+  <div class="panel-foot">
+    <textarea id="chat-input" placeholder="Type a task — e.g. 'give me a morning brief'"></textarea>
+    <div class="send-row">
+      <button id="send-btn">Run</button>
+      <button class="secondary" id="clear-btn">Clear</button>
+    </div>
+  </div>
+</section>
+
+<!-- ─── live code stream ─────────────────────────────────────────────── -->
+<section class="panel">
+  <div class="panel-header">
+    Live execution
+    <span class="meta">
+      <span class="dot" id="live-dot"></span>
+      <span id="live-state">idle</span>
+    </span>
+  </div>
+  <div class="panel-body" id="code-stream"></div>
+  <div class="status-bar">
+    <span class="item"><span>turns:</span> <b id="stat-turns">0</b></span>
+    <span class="item"><span>blocks:</span> <b id="stat-blocks">0</b></span>
+    <span class="item"><span>lines:</span> <b id="stat-lines">0</b></span>
+    <span class="item"><span>tokens:</span> <b id="stat-tokens">0/0</b></span>
+    <span class="item" style="margin-left:auto"><span>elapsed:</span> <b id="stat-elapsed">0s</b></span>
+  </div>
+</section>
+
+<!-- ─── events ──────────────────────────────────────────────────────── -->
+<section class="panel">
+  <div class="panel-header">Events <span class="meta" id="event-count">0</span></div>
+  <div class="panel-body" id="event-stream"></div>
+  <div class="panel-foot">
+    <h3 class="section">Runtime</h3>
+    <div class="runtime-list" id="runtime-list"><span class="chip">no session</span></div>
+  </div>
+</section>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/run";
+
+  // ── state ──────────────────────────────────────────────────────────
+  let ws = null;
+  let running = false;
+  let runStart = null;
+  let elapsedTimer = null;
+  let blockCount = 0;
+  let lineCount = 0;
+  let turnCount = 0;
+  let currentBlock = null;     // {idx, lines: [...], element}
+
+  // ── helpers ────────────────────────────────────────────────────────
+  function fmtTime(s) {
+    if (s < 60) return s.toFixed(1) + "s";
+    const m = Math.floor(s / 60), r = (s - m*60).toFixed(0);
+    return m + "m " + r + "s";
+  }
+  function scrollPanel(el) {
+    requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
+  }
+  function setLive(on, label) {
+    $("live-dot").classList.toggle("live", !!on);
+    $("live-state").textContent = label || (on ? "running" : "idle");
+  }
+  function setStatus(text) { $("status-meta").textContent = text; }
+  function startElapsed() {
+    runStart = performance.now();
+    elapsedTimer = setInterval(() => {
+      $("stat-elapsed").textContent = fmtTime((performance.now() - runStart) / 1000);
+    }, 250);
+  }
+  function stopElapsed() {
+    if (elapsedTimer) clearInterval(elapsedTimer);
+    elapsedTimer = null;
+  }
+  function appendChat(role, text, cls) {
+    const div = document.createElement("div");
+    div.className = "msg " + (cls || role);
+    const r = document.createElement("div");
+    r.className = "msg-role";
+    r.textContent = role;
+    div.appendChild(r);
+    const b = document.createElement("div");
+    b.textContent = text;
+    div.appendChild(b);
+    $("chat-log").appendChild(div);
+    scrollPanel($("chat-log"));
+    return div;
+  }
+  function shortenJson(obj, max=160) {
+    let s; try { s = JSON.stringify(obj); } catch { s = String(obj); }
+    if (s.length <= max) return s;
+    return s.slice(0, max - 1) + "…";
+  }
+  function clampStr(s, max=240) {
+    s = String(s ?? "");
+    if (s.length <= max) return s;
+    return s.slice(0, max - 1) + "…";
+  }
+
+  // ── render: one code block ─────────────────────────────────────────
+  function renderCodeBlock(code) {
+    blockCount++;
+    $("stat-blocks").textContent = blockCount;
+
+    const wrap = document.createElement("div");
+    wrap.className = "code-block";
+    wrap.dataset.blockIdx = blockCount;
+
+    const head = document.createElement("div");
+    head.className = "code-head";
+    head.innerHTML = `<span># block ${blockCount}</span><span class="badge">running</span>`;
+    wrap.appendChild(head);
+
+    const pre = document.createElement("pre");
+    const codeEl = document.createElement("code");
+    codeEl.className = "language-python";
+    codeEl.textContent = code;
+    // highlight first, then split into per-line rows so we can flash individual lines
+    try { hljs.highlightElement(codeEl); } catch {}
+    const html = codeEl.innerHTML;
+    pre.innerHTML = "";
+    const lines = html.split("\n");
+    const lineEls = [];
+    lines.forEach((html, i) => {
+      const row = document.createElement("div");
+      row.className = "code-line";
+      row.dataset.line = i + 1;
+      row.innerHTML = `<span class="ln">${i + 1}</span><span class="src">${html || " "}</span>`;
+      pre.appendChild(row);
+      lineEls.push(row);
+    });
+    wrap.appendChild(pre);
+
+    $("code-stream").appendChild(wrap);
+    scrollPanel($("code-stream"));
+
+    currentBlock = { idx: blockCount, element: wrap, lineEls, head };
+    return currentBlock;
+  }
+
+  function flashLine(blockIdx, lineno) {
+    if (!currentBlock || currentBlock.idx !== blockIdx) {
+      // line_executed events arrive only for the most recent block
+      // — we map by current pointer to keep it simple.
+    }
+    const row = currentBlock?.lineEls?.[lineno - 1];
+    if (!row) return;
+    row.classList.add("executed", "flashing");
+    setTimeout(() => row.classList.remove("flashing"), 420);
+  }
+
+  function blockFinished(payload) {
+    if (!currentBlock) return;
+    const hadErr = !!payload?.had_error;
+    currentBlock.element.classList.toggle("had-error", hadErr);
+    const badge = currentBlock.head.querySelector(".badge");
+    if (badge) badge.textContent = hadErr ? "error" : "ok";
+  }
+
+  function appendOutput(kind, text) {
+    if (!currentBlock || !text) return;
+    const el = document.createElement("div");
+    el.className = kind;  // stdout|stderr|err|lint
+    el.textContent = text;
+    currentBlock.element.appendChild(el);
+    scrollPanel($("code-stream"));
+  }
+
+  // ── render: an event in the sidebar ────────────────────────────────
+  function renderEvent(ev) {
+    $("event-count").textContent = parseInt($("event-count").textContent || "0") + 1;
+
+    const row = document.createElement("div");
+    row.className = "event " + ev.type;
+    const ts = (ev.ts || "").split("T")[1]?.slice(0, 12) || "";
+    let body = "", args = "";
+    const p = ev.payload || {};
+    switch (ev.type) {
+      case "tool_called":
+        body = (p.tool || "?") + (p.args ? "(" + shortenJson(p.args, 80) + ")" : "()");
+        if (p.result) args = "→ " + shortenJson(p.result, 80);
+        break;
+      case "subagent_called":
+        body = (p.name || "?") + "(" + (Object.keys(p.kwargs || {}).join(", ")) + ")";
+        break;
+      case "subagent_returned":
+        body = (p.name || "?") + " → " + shortenJson(p.result, 90);
+        break;
+      case "code_emitted":
+        const code = p.code || "";
+        body = code.split("\n").length + " lines  " + clampStr(code.split("\n")[0], 80);
+        break;
+      case "code_executed":
+        body = `lines=${p.lines ?? "?"} ${p.had_error ? "ERR" : "ok"}`;
+        break;
+      case "execution_error":
+        body = clampStr(p.error, 200);
+        break;
+      case "line_executed":
+        return null;  // too noisy for sidebar
+      case "llm_request":
+        body = `turn=${p.turn ?? "?"} messages=${p.messages ?? "?"}`;
+        break;
+      case "llm_response":
+        body = `turn=${p.turn ?? "?"} stop=${p.stop_reason ?? "?"} text_len=${p.text_len ?? "?"}`;
+        break;
+      case "turn_complete":
+        body = `turn=${p.turn ?? "?"} done=${p.done} blocks=${p.blocks ?? "?"}`;
+        if (p.done) {
+          turnCount = p.turn ?? turnCount;
+          $("stat-turns").textContent = turnCount;
+        }
+        break;
+      default:
+        body = shortenJson(p, 200);
+    }
+    if (body == null) return null;
+
+    const badge = `<span class="badge">${ev.type.replace("_", " ")}</span>`;
+    const tsEl = `<span class="ts">${ts}</span>`;
+    row.innerHTML = `${tsEl} ${badge}<div class="body">${escapeHtml(body)}</div>` +
+                    (args ? `<div class="args">${escapeHtml(args)}</div>` : "");
+    $("event-stream").appendChild(row);
+    scrollPanel($("event-stream"));
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+  }
+
+  // ── runtime sidebar ────────────────────────────────────────────────
+  function renderRuntime(ready) {
+    const list = $("runtime-list");
+    list.innerHTML = "";
+    function chip(text, cls) {
+      const c = document.createElement("span");
+      c.className = "chip " + (cls || "");
+      c.textContent = text;
+      list.appendChild(c);
+    }
+    if (!ready) { chip("no session"); return; }
+    chip("model: " + ready.model);
+    (ready.mcp_servers || []).forEach(s => chip("mcp:" + s, "mcp"));
+    (ready.sub_agents || []).forEach(s => chip("sub:" + s, "sub"));
+    (ready.skills || []).forEach(s => chip("skill:" + s, "skill"));
+  }
+
+  // ── event dispatch ─────────────────────────────────────────────────
+  function dispatch(msg) {
+    if (msg.kind === "ready") {
+      renderRuntime(msg);
+      setStatus("connected");
+      setLive(true, "running");
+      startElapsed();
+      return;
+    }
+    if (msg.kind === "event") {
+      const ev = msg;
+      // mirror line/tokens stats
+      const t = ev.type;
+      if (t === "line_executed") {
+        lineCount++;
+        $("stat-lines").textContent = lineCount;
+        if (currentBlock) flashLine(currentBlock.idx, ev.payload?.lineno);
+      } else if (t === "code_emitted") {
+        const code = ev.payload?.code || "";
+        renderCodeBlock(code);
+      } else if (t === "code_executed") {
+        blockFinished(ev.payload);
+      } else if (t === "execution_error") {
+        appendOutput("err", ev.payload?.error || "");
+      } else if (t === "tool_called" && ev.payload?.tool === "bash") {
+        // bash output sits under the block; we don't get stdout in the
+        // tool_called payload, only its return-code summary.
+      }
+      renderEvent(ev);
+      return;
+    }
+    if (msg.kind === "final") {
+      appendChat("agent", msg.text || "(empty)", "agent");
+      return;
+    }
+    if (msg.kind === "error") {
+      appendChat("error", (msg.error || "unknown error") +
+        (msg.traceback ? "\n\n" + msg.traceback : ""), "error");
+      return;
+    }
+    if (msg.kind === "done") {
+      $("stat-tokens").textContent = `${msg.tokens_in ?? 0}/${msg.tokens_out ?? 0}`;
+      setLive(false, "done");
+      stopElapsed();
+      running = false;
+      $("send-btn").disabled = false;
+      setStatus(`done in ${fmtTime(msg.elapsed_s || 0)}`);
+      return;
+    }
+  }
+
+  // ── WebSocket lifecycle ────────────────────────────────────────────
+  function openSocket(prompt) {
+    if (ws) try { ws.close(); } catch {}
+    ws = new WebSocket(wsUrl);
+    setStatus("connecting…");
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ prompt }));
+    };
+    ws.onmessage = (e) => {
+      let msg; try { msg = JSON.parse(e.data); } catch { return; }
+      dispatch(msg);
+    };
+    ws.onerror = () => setStatus("ws error");
+    ws.onclose = () => {
+      setLive(false, "idle");
+      stopElapsed();
+      running = false;
+      $("send-btn").disabled = false;
+      if (!$("status-meta").textContent.startsWith("done")) {
+        setStatus("disconnected");
+      }
+    };
+  }
+
+  // ── UI actions ─────────────────────────────────────────────────────
+  function sendPrompt() {
+    if (running) return;
+    const prompt = $("chat-input").value.trim();
+    if (!prompt) return;
+    running = true;
+    $("send-btn").disabled = true;
+    appendChat("user", prompt, "user");
+    // reset per-run state
+    blockCount = 0; lineCount = 0; turnCount = 0; currentBlock = null;
+    $("stat-blocks").textContent = "0";
+    $("stat-lines").textContent = "0";
+    $("stat-turns").textContent = "0";
+    $("stat-tokens").textContent = "0/0";
+    $("stat-elapsed").textContent = "0s";
+    $("code-stream").innerHTML = "";
+    $("event-stream").innerHTML = "";
+    $("event-count").textContent = "0";
+    $("chat-input").value = "";
+    openSocket(prompt);
+  }
+  $("send-btn").addEventListener("click", sendPrompt);
+  $("chat-input").addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === "Enter") sendPrompt();
+  });
+  $("clear-btn").addEventListener("click", () => {
+    if (running) return;
+    $("chat-log").innerHTML = "";
+    $("code-stream").innerHTML = "";
+    $("event-stream").innerHTML = "";
+    $("event-count").textContent = "0";
+    blockCount = lineCount = turnCount = 0;
+    $("stat-blocks").textContent = "0";
+    $("stat-lines").textContent = "0";
+    $("stat-turns").textContent = "0";
+    $("stat-tokens").textContent = "0/0";
+    $("stat-elapsed").textContent = "0s";
+    setStatus("idle");
+    setLive(false, "idle");
+  });
+
+  // initial health probe so the panel labels itself
+  fetch("/health").then(r => r.json()).then(h => {
+    setStatus("ready · " + h.model);
+  }).catch(() => setStatus("server unreachable"));
+})();
+</script>
+</body>
+</html>

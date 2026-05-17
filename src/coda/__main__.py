@@ -39,6 +39,28 @@ def _build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Disable ANSI color escapes.",
     )
+
+    srv = sub.add_parser(
+        "serve",
+        help="Run the live UI on http://localhost:PORT (default 8000).",
+    )
+    srv.add_argument("--host", default="127.0.0.1", help="Host to bind.")
+    srv.add_argument("--port", type=int, default=8000, help="Port to bind.")
+    srv.add_argument(
+        "--skills-dir",
+        default=None,
+        help="Directory of saved skills to load (defaults to ./skills).",
+    )
+    srv.add_argument(
+        "--no-gmail",
+        action="store_true",
+        help="Skip the Gmail MCP server (faster startup, no Gmail tools).",
+    )
+    srv.add_argument(
+        "--no-discord",
+        action="store_true",
+        help="Skip the Discord webhook tool.",
+    )
     return parser
 
 
@@ -70,6 +92,60 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         by_type = count_by_type(args.path, filter_types=filter_types)
         print(_format_summary(total, by_type))
+        return 0
+
+    if args.command == "serve":
+        try:
+            from .server import ServerConfig, serve
+        except ImportError as e:
+            print(
+                f"error: serve requires fastapi + uvicorn. "
+                f"Install with: pip install 'coda[server]'\n  ({e})",
+                file=sys.stderr,
+            )
+            return 2
+
+        # Defaults match the morning_brief setup: Gmail + Discord webhook
+        # tool + triage_email sub-agent + skills_dir. Examples are
+        # repo-local so this works out of the box from a `coda` checkout.
+        import os
+        from pathlib import Path
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        skills_dir = Path(args.skills_dir).resolve() if args.skills_dir else repo_root / "skills"
+
+        sub_agents: list = []
+        inline_tools: list = []
+        mcp_servers: list = []
+
+        # Pull the triage_email sub-agent + post_to_discord tool from the
+        # bundled example so the live UI mirrors what the user has seen
+        # before. Failing to import any of them is non-fatal — UI still
+        # works, just with a smaller toolbelt.
+        examples_dir = repo_root / "examples"
+        if examples_dir.is_dir():
+            sys.path.insert(0, str(examples_dir))
+            try:
+                import morning_brief as _mb  # noqa: E402
+                sub_agents.append(_mb.triage_email)
+                if not args.no_discord and os.environ.get("DISCORD_WEBHOOK_URL"):
+                    inline_tools.append(_mb.post_to_discord)
+                if not args.no_gmail and (Path.home() / ".gmail-mcp" / "credentials.json").exists():
+                    mcp_servers.append(_mb.gmail_mcp())
+            except ImportError as e:
+                print(f"warning: couldn't load example tools ({e})", file=sys.stderr)
+
+        config = ServerConfig(
+            skills_dir=skills_dir,
+            sub_agents=sub_agents,
+            inline_tools=inline_tools,
+            mcp_servers=mcp_servers,
+        )
+        print(f"coda serve  →  http://{args.host}:{args.port}", file=sys.stderr)
+        print(f"  skills:       {skills_dir} ({len(list(skills_dir.glob('*.py')))} files)" if skills_dir.exists() else f"  skills:       {skills_dir} (will be created)", file=sys.stderr)
+        print(f"  sub-agents:   {[sa.name for sa in sub_agents] or '—'}", file=sys.stderr)
+        print(f"  inline tools: {[t.name for t in inline_tools] or '—'}", file=sys.stderr)
+        print(f"  mcp servers:  {[s.name for s in mcp_servers] or '—'}", file=sys.stderr)
+        serve(host=args.host, port=args.port, config=config)
         return 0
 
     parser.error(f"unknown command: {args.command}")
