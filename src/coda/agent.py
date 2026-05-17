@@ -36,6 +36,19 @@ CODE_BLOCK_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+# A line containing only a "# --- next block ---" comment (any number
+# of dashes, optional whitespace) is treated as a soft fence boundary
+# WITHIN a fenced block. The model is taught to emit multiple ```python
+# fences per turn, but in practice it sometimes wraps an entire reply
+# in one fence and uses these comment separators instead. Without
+# splitting on them, any SyntaxError inside such a mega-block voids
+# every segment — observed in framework_compare_020702, diagnosed by
+# coda's own self_debug demo (runs/self_debug_diagnosis_20260517_114052.md).
+BLOCK_SEPARATOR_RE = re.compile(
+    r"^[ \t]*#[ \t]*-{2,}[ \t]*next[ \t]+block[ \t]*-{2,}[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 
 @dataclass
 class RunResult:
@@ -261,8 +274,21 @@ class Agent:
 
 
 def _extract_code_blocks(text: str) -> list[str]:
-    """Return every Python code block in `text`, in order. Empty list if none."""
-    return [m.group(1).rstrip() for m in CODE_BLOCK_RE.finditer(text)]
+    """Return every Python code block in `text`, in order. Empty list if none.
+
+    A fenced block whose body contains `# --- next block ---` separator
+    comments is split on those markers so each segment runs independently.
+    Without this, a SyntaxError inside any one segment would void every
+    other segment of the same fence (see framework_compare_020702 trace).
+    """
+    out: list[str] = []
+    for m in CODE_BLOCK_RE.finditer(text):
+        body = m.group(1)
+        for segment in BLOCK_SEPARATOR_RE.split(body):
+            s = segment.strip("\n").rstrip()
+            if s.strip():
+                out.append(s)
+    return out
 
 
 def _extract_code_block(text: str) -> str | None:

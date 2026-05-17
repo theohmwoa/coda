@@ -7,7 +7,7 @@ from typing import Literal
 import pytest
 from pydantic import BaseModel
 
-from coda.agent import Agent, _extract_code_block, _format_execution
+from coda.agent import Agent, _extract_code_block, _extract_code_blocks, _format_execution
 from coda.hooks import HookRegistry
 from coda.llm import CompletionResponse, MockLLMClient, ToolCall
 from coda.sandbox import ExecutionResult, Sandbox
@@ -109,6 +109,64 @@ print(f'part two: {y}')
     # Both blocks must have written stdout
     assert "part one done" in result.executions[0].stdout
     assert "part two: 42" in result.executions[1].stdout
+
+
+def test_internal_next_block_separator_splits_a_fence():
+    """A fenced block containing `# --- next block ---` separator comments
+    must split into multiple segments — otherwise a SyntaxError in one
+    sub-segment voids them all (framework_compare_020702 failure mode,
+    diagnosed by the self_debug demo)."""
+    text = """```python
+print('a')
+# --- next block ---
+print('b')
+# --- next block ---
+print('c')
+```"""
+    blocks = _extract_code_blocks(text)
+    assert len(blocks) == 3
+    assert "print('a')" in blocks[0]
+    assert "print('b')" in blocks[1]
+    assert "print('c')" in blocks[2]
+
+
+def test_internal_next_block_separator_is_case_and_dash_tolerant():
+    text = """```python
+x = 1
+#--- NEXT BLOCK ---
+y = 2
+#  ---- next block -----
+z = 3
+```"""
+    blocks = _extract_code_blocks(text)
+    assert len(blocks) == 3
+
+
+def test_internal_separator_only_inside_fence_is_a_split(tmp_path):
+    """End-to-end: a fenced block with an internal SyntaxError after a
+    separator must NOT void the segment before it."""
+    mock = MockLLMClient(
+        responses=[
+            CompletionResponse(
+                text="""```python
+write('survived.txt', 'hello')
+print('block 1 ok')
+# --- next block ---
+def broken(:
+    pass
+# --- next block ---
+write('never_ran.txt', 'should not exist')
+```"""
+            ),
+            CompletionResponse(text="done."),
+        ]
+    )
+    agent = Agent(model="m", llm=mock, sandbox=Sandbox(root=tmp_path))
+    result = agent.run("mixed")
+    assert (tmp_path / "survived.txt").exists()
+    assert not (tmp_path / "never_ran.txt").exists()
+    feedback = result.messages[2].content
+    assert "SyntaxError" in feedback
 
 
 def test_syntax_error_in_one_block_does_not_void_prior_blocks(tmp_path):
