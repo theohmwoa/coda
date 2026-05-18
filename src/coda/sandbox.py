@@ -50,6 +50,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .context import Ctx
 from .hooks import Event, HookRegistry
 
 
@@ -83,6 +84,13 @@ class Sandbox:
         self.hooks = hooks or HookRegistry()
         self.bash_timeout_s = bash_timeout_s
         self.max_read_bytes = max_read_bytes
+        # Source lines of the code currently being executed. Set at the top
+        # of execute() and cleared at the bottom. The Ctx instance reads from
+        # this via the provider closure to capture source expressions on
+        # each ctx.* assignment.
+        self._current_source_lines: list[str] | None = None
+        self.ctx = Ctx(source_provider=self._current_source_provider)
+        self.ctx._ctx_set_hook(self._on_ctx_event)
         self.globals: dict[str, Any] = {
             "__builtins__": builtins.__dict__,
             "__name__": "__coda__",
@@ -93,6 +101,7 @@ class Sandbox:
             "write": self.write,
             "edit": self.edit,
             "bash": self.bash,
+            "ctx": self.ctx,
         }
         if extra_globals:
             self.globals.update(extra_globals)
@@ -100,6 +109,20 @@ class Sandbox:
     def inject(self, name: str, value: Any) -> None:
         """Make `value` available to executed code as the global `name`."""
         self.globals[name] = value
+
+    def _current_source_provider(self) -> list[str] | None:
+        """Return the source lines of the code currently executing, if any.
+
+        Ctx queries this on every assignment to look up the source line at
+        the user-code frame's lineno. Returns None outside an execute() call.
+        """
+        return self._current_source_lines
+
+    def _on_ctx_event(self, event_type: str, payload: dict) -> None:
+        """Bridge Ctx events into the HookRegistry as structured Events."""
+        # Cast to satisfy the EventType Literal at runtime; the registry
+        # itself accepts any string for unknown event types.
+        self.hooks.emit(Event(type=event_type, payload=payload))  # type: ignore[arg-type]
 
     def _resolve(self, path: str | Path) -> Path:
         target = Path(path)
@@ -397,12 +420,16 @@ class Sandbox:
         err_repr: str | None = None
         tb_str: str | None = None
         prev_tracer = sys.gettrace()
+        # Make the source lines available to Ctx during this exec, so any
+        # `ctx.* = expr` assignments can capture their RHS for requery hints.
+        self._current_source_lines = code.splitlines()
         try:
             compiled = compile(code, "<coda>", "exec")
         except SyntaxError as e:
             tb_str = traceback.format_exc()
             err_repr = repr(e)
             hooks.emit(Event(type="execution_error", payload={"error": err_repr}))
+            self._current_source_lines = None
             return ExecutionResult(
                 stdout="",
                 stderr="",
@@ -423,6 +450,8 @@ class Sandbox:
             err_repr = repr(e)
             tb_str = traceback.format_exc()
             hooks.emit(Event(type="execution_error", payload={"error": err_repr}))
+        finally:
+            self._current_source_lines = None
 
         result = ExecutionResult(
             stdout=stdout.getvalue(),

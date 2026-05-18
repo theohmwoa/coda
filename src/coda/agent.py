@@ -21,6 +21,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .context import (
+    ContextPolicy,
+    build_context_reminder,
+    build_print_habit_reminder,
+    render_ctx_delta,
+)
 from .hooks import Event, HookRegistry
 from .llm import LLMClient, Message
 from .mcp import MCPRuntime, MCPServer, ServerProxy, register_for_atexit
@@ -78,6 +84,7 @@ class Agent:
         prompt_assembler: Assembler | None = None,
         max_turns: int = 25,
         max_tokens: int = 4096,
+        context_policy: ContextPolicy | None = None,
     ) -> None:
         self.model = model
         self.llm = llm
@@ -88,6 +95,7 @@ class Agent:
         self.tools_dir = tools_dir
         self.max_turns = max_turns
         self.max_tokens = max_tokens
+        self.context_policy = context_policy
 
         for sa in self.subagents:
             sa.bind(self.llm, self.hooks)
@@ -168,8 +176,19 @@ class Agent:
         executions: list[ExecutionResult] = []
         in_tokens = 0
         out_tokens = 0
+        # Turns since the last context-policy reminder fired. Initialized
+        # high so the first over-threshold turn fires without waiting for
+        # the cooldown to accumulate. After firing, reset to 0 and counted
+        # back up to cooldown_turns before another reminder is allowed.
+        turns_since_reminder = 10**9
+        # Same idea for the print-habit reminder — fired when this turn's
+        # stdout volume crosses the policy's large_print_chars threshold.
+        turns_since_print_warn = 10**9
 
         for turn in range(1, self.max_turns + 1):
+            # Stamp this turn on subsequent ctx.* assignments so the model
+            # can see "this was set in turn 3" in renders and reminders.
+            self.sandbox.ctx._ctx_set_turn(turn)
             self.hooks.emit(
                 Event(type="llm_request", payload={"turn": turn, "messages": len(messages)})
             )
@@ -207,6 +226,11 @@ class Agent:
                     output_tokens=out_tokens,
                 )
 
+            # Snapshot ctx entries before execution so we can render the
+            # delta to the agent (it uses this in place of print() to see
+            # what landed in ctx).
+            ctx_before = self.sandbox.ctx._entries()
+
             # Execute every fenced code block in this turn, one at a time,
             # against the shared persistent sandbox globals. Backends that
             # wrap Claude Code's own loop tend to emit several blocks per
@@ -243,6 +267,133 @@ class Agent:
                 total_blocks=len(blocks),
                 lint_findings=lint_findings,
             )
+
+            # Render the ctx delta (added / changed / removed entries this
+            # turn) right after the execution result. This is the agent's
+            # primary signal in place of print() — when the agent assigns
+            # `ctx.X = value`, the value shows up here next turn.
+            ctx_delta = render_ctx_delta(self.sandbox.ctx, before=ctx_before)
+            if ctx_delta:
+                feedback = f"{feedback}\n{ctx_delta}"
+
+            # Context-policy: if input_tokens crossed the threshold this
+            # turn (and cooldown has elapsed), append a one-shot
+            # system-reminder asking the agent to manage its ctx for the
+            # next turn. The reminder lists the largest live entries
+            # (with their source expressions), and any recently-dropped
+            # entries with requery hints so the agent can bring them back
+            # without losing the call that produced them.
+            if self.context_policy is not None:
+                fire = self.context_policy.should_remind(
+                    input_tokens=resp.input_tokens,
+                    turns_since_last=turns_since_reminder,
+                )
+                if fire:
+                    reminder = build_context_reminder(
+                        self.sandbox.ctx,
+                        input_tokens=resp.input_tokens,
+                        budget_tokens=self.context_policy.budget_tokens,
+                        max_largest_entries=self.context_policy.max_largest_entries,
+                        include_dropped=self.context_policy.include_dropped,
+                    )
+                    feedback = f"{feedback}\n\n{reminder}"
+                    turns_since_reminder = 0
+                    self.hooks.emit(
+                        Event(
+                            type="context_reminder_emitted",
+                            payload={
+                                "turn": turn,
+                                "input_tokens": resp.input_tokens,
+                                "budget_tokens": self.context_policy.budget_tokens,
+                                "ctx_entries": len(self.sandbox.ctx),
+                                "ctx_dropped": len(self.sandbox.ctx._dropped()),
+                            },
+                        )
+                    )
+                else:
+                    turns_since_reminder += 1
+
+                # Print-habit reminder: two modes, both fire at most once per
+                # turn (force takes precedence over size-based when both
+                # would apply, since force is the stronger steer).
+                #
+                # FORCE mode: any non-trivial `print(...)` in the emitted
+                # code fires the reminder, regardless of stdout size.
+                # Triggered by inspecting the source, not the output —
+                # so even small data prints are caught.
+                #
+                # SIZE mode: total stdout chars across blocks crossed the
+                # `large_print_chars` threshold. Triggered by output.
+                stdout_total = sum(len(r.stdout) for r in block_results)
+                data_print_line: str | None = None
+                data_print_block_i: int | None = None
+                for i, block_src in enumerate(blocks, start=1):
+                    line = _first_loud_print_line(block_src)
+                    if line is not None:
+                        data_print_line = line
+                        data_print_block_i = i
+                        break
+
+                fired_print_warn = False
+                if self.context_policy.should_force_ctx(
+                    has_data_print=(data_print_line is not None),
+                    turns_since_last=turns_since_print_warn,
+                ):
+                    print_reminder = build_print_habit_reminder(
+                        stdout_chars=stdout_total,
+                        block_index=data_print_block_i if len(block_results) > 1 else None,
+                        code_snippet=data_print_line,
+                        force=True,
+                    )
+                    feedback = f"{feedback}\n\n{print_reminder}"
+                    fired_print_warn = True
+                    self.hooks.emit(
+                        Event(
+                            type="print_habit_warning_emitted",
+                            payload={
+                                "turn": turn,
+                                "mode": "force",
+                                "stdout_chars": stdout_total,
+                                "snippet": data_print_line,
+                            },
+                        )
+                    )
+                elif self.context_policy.should_warn_print(
+                    stdout_chars=stdout_total,
+                    turns_since_last=turns_since_print_warn,
+                ):
+                    loud_block_i, _ = max(
+                        enumerate(block_results, start=1),
+                        key=lambda ix_r: len(ix_r[1].stdout),
+                    )
+                    snippet = _first_loud_print_line(
+                        blocks[loud_block_i - 1] if loud_block_i - 1 < len(blocks) else None
+                    )
+                    print_reminder = build_print_habit_reminder(
+                        stdout_chars=stdout_total,
+                        block_index=loud_block_i if len(block_results) > 1 else None,
+                        code_snippet=snippet,
+                        force=False,
+                    )
+                    feedback = f"{feedback}\n\n{print_reminder}"
+                    fired_print_warn = True
+                    self.hooks.emit(
+                        Event(
+                            type="print_habit_warning_emitted",
+                            payload={
+                                "turn": turn,
+                                "mode": "size",
+                                "stdout_chars": stdout_total,
+                                "snippet": snippet,
+                            },
+                        )
+                    )
+
+                if fired_print_warn:
+                    turns_since_print_warn = 0
+                else:
+                    turns_since_print_warn += 1
+
             messages.append(Message(role="user", content=feedback))
             self.hooks.emit(
                 Event(
@@ -271,6 +422,30 @@ class Agent:
 
     def __exit__(self, *_exc) -> None:
         self.close()
+
+
+def _first_loud_print_line(block: str | None) -> str | None:
+    """Return the first `print(...)` line in `block` whose argument is NOT
+    a string literal — that's the most likely culprit for a big stdout.
+
+    String-literal prints (`print("ok")`) are almost certainly small; we
+    skip them so the reminder's "Offending line" snippet points at the
+    actual data dump, not a status message printed alongside it.
+    """
+    if not block:
+        return None
+    for line in block.splitlines():
+        s = line.strip()
+        if not s.startswith("print("):
+            continue
+        # Heuristic: a print whose argument is just `"..."` or `'...'` —
+        # i.e. opens immediately on a quote, with no expression inside —
+        # is a tiny status line. Skip it.
+        inner = s[len("print("):].lstrip()
+        if inner.startswith(("'", '"')) and not any(c in inner for c in "+,({["):
+            continue
+        return s
+    return None
 
 
 def _extract_code_blocks(text: str) -> list[str]:

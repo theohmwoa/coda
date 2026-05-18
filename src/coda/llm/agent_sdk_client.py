@@ -154,7 +154,19 @@ class ClaudeAgentSDKClient(LLMClient):
                     elif isinstance(msg, ResultMessage):
                         usage = getattr(msg, "usage", None) or {}
                         if isinstance(usage, dict):
-                            in_toks = int(usage.get("input_tokens", 0) or 0)
+                            # Anthropic returns `input_tokens` as ONLY the
+                            # uncached new tokens — cache_read and
+                            # cache_creation are reported separately. The
+                            # model still SEES all of them (cache only
+                            # reduces $/latency, not context size), so a
+                            # context-budget check must sum all three.
+                            # Without this, threshold policies fire late
+                            # or never on cached-heavy workloads.
+                            in_toks = (
+                                int(usage.get("input_tokens", 0) or 0)
+                                + int(usage.get("cache_read_input_tokens", 0) or 0)
+                                + int(usage.get("cache_creation_input_tokens", 0) or 0)
+                            )
                             out_toks = int(usage.get("output_tokens", 0) or 0)
             except Exception as e:
                 if text_parts or tool_calls:

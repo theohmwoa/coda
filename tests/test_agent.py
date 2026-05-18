@@ -358,3 +358,480 @@ def test_system_prompt_lists_inline_tools_and_subagents(tmp_path):
     assert "search" in prompt
     assert "check" in prompt
     assert "Pydantic" in prompt or "typed" in prompt.lower()
+
+
+# --- ctx + ContextPolicy integration -----------------------------------------
+
+
+def _responder_factory(scripted):
+    """Build a MockLLMClient responder that yields scripted texts in order,
+    but stamps each response with a deterministic input_tokens so we can
+    drive the threshold policy from the test.
+
+    scripted: list of (text, input_tokens) tuples
+    """
+    iterator = iter(scripted)
+
+    def responder(call):
+        text, input_tokens = next(iterator)
+        return CompletionResponse(
+            text=text, input_tokens=input_tokens, output_tokens=10
+        )
+
+    return responder
+
+
+def test_agent_stamps_turn_number_on_ctx_assignments(tmp_path):
+    mock = MockLLMClient(
+        responses=[
+            CompletionResponse(text="```python\nctx.x = 1\n```", input_tokens=100),
+            CompletionResponse(text="```python\nctx.y = 2\n```", input_tokens=110),
+            CompletionResponse(text="Done."),
+        ]
+    )
+    sandbox = Sandbox(root=tmp_path)
+    agent = Agent(model="m", llm=mock, sandbox=sandbox)
+    agent.run("set things")
+    entries = sandbox.ctx._entries()
+    assert entries["x"].set_at_turn == 1
+    assert entries["y"].set_at_turn == 2
+
+
+def test_no_reminder_when_policy_unset(tmp_path):
+    # Without a context_policy, no reminder is ever appended, regardless
+    # of how many input tokens the mock reports.
+    mock = MockLLMClient(
+        responder=_responder_factory(
+            [
+                ("```python\nctx.x = 'x' * 5000\n```", 500_000),  # absurdly large
+                ("Done.", 500_000),
+            ]
+        )
+    )
+    sandbox = Sandbox(root=tmp_path)
+    agent = Agent(model="m", llm=mock, sandbox=sandbox)
+    agent.run("go")
+    # Walk the messages: no system-reminder should have been added.
+    for msg in mock.calls[-1].messages:
+        assert "<system-reminder>" not in msg.content
+
+
+def test_reminder_fires_when_threshold_crossed(tmp_path):
+    from coda.context import ContextPolicy
+
+    # First turn: agent assigns something to ctx and overshoots threshold.
+    # Second turn (where we observe the reminder): the conversation it
+    # sees should now contain the system-reminder appended after the
+    # execution result of turn 1.
+    mock = MockLLMClient(
+        responder=_responder_factory(
+            [
+                (
+                    "```python\n"
+                    "def fetch_policy():\n"
+                    "    return 'x' * 100\n"
+                    "ctx.policy = fetch_policy()\n"
+                    "```",
+                    9_000,  # just over the 75% of 10K threshold
+                ),
+                ("All set.", 9_500),
+            ]
+        )
+    )
+    sandbox = Sandbox(root=tmp_path)
+    policy = ContextPolicy(budget_tokens=10_000, cooldown_turns=0)
+    agent = Agent(model="m", llm=mock, sandbox=sandbox, context_policy=policy)
+    agent.run("go")
+
+    # The second LLM call should have seen the reminder appended to the
+    # user-feedback message from turn 1.
+    second_call = mock.calls[1]
+    user_messages = [m.content for m in second_call.messages if m.role == "user"]
+    last_user = user_messages[-1]
+    assert "<system-reminder>" in last_user
+    # Source expression of the assignment must appear as a requery /
+    # source hint somewhere in the reminder.
+    assert "fetch_policy()" in last_user
+
+
+def test_reminder_lists_largest_ctx_entries(tmp_path):
+    from coda.context import ContextPolicy
+
+    mock = MockLLMClient(
+        responder=_responder_factory(
+            [
+                (
+                    "```python\n"
+                    "ctx.tiny = 1\n"
+                    "ctx.huge = 'x' * 2000\n"
+                    "```",
+                    9_000,
+                ),
+                ("Done.", 9_500),
+            ]
+        )
+    )
+    sandbox = Sandbox(root=tmp_path)
+    policy = ContextPolicy(budget_tokens=10_000, cooldown_turns=0)
+    agent = Agent(model="m", llm=mock, sandbox=sandbox, context_policy=policy)
+    agent.run("go")
+
+    last_user = mock.calls[1].messages[-1].content
+    assert "<system-reminder>" in last_user
+    # Scope the ordering check to the reminder section — the ctx_delta
+    # above it lists entries in insertion order, which is not what this
+    # test is about.
+    reminder = last_user.split("<system-reminder>", 1)[1]
+    # Both names should be listed, and "huge" should come first (by size).
+    assert reminder.find("huge") < reminder.find("tiny")
+
+
+def test_reminder_includes_dropped_with_requery_hint(tmp_path):
+    from coda.context import ContextPolicy
+
+    mock = MockLLMClient(
+        responder=_responder_factory(
+            [
+                (
+                    "```python\n"
+                    "def history(): return 'x' * 200\n"
+                    "ctx.h = history()\n"
+                    "del ctx.h\n"
+                    "ctx.something_else = 'y' * 2000\n"
+                    "```",
+                    9_000,
+                ),
+                ("Done.", 9_500),
+            ]
+        )
+    )
+    sandbox = Sandbox(root=tmp_path)
+    policy = ContextPolicy(budget_tokens=10_000, cooldown_turns=0)
+    agent = Agent(model="m", llm=mock, sandbox=sandbox, context_policy=policy)
+    agent.run("go")
+
+    last_user = mock.calls[1].messages[-1].content
+    assert "Recently dropped" in last_user
+    assert "requery: history()" in last_user
+
+
+def test_reminder_cooldown_suppresses_back_to_back(tmp_path):
+    from coda.context import ContextPolicy
+
+    # Three turns all over threshold. With cooldown=2, reminder fires
+    # on turn 1, suppressed on turn 2, then we stop (no more code).
+    mock = MockLLMClient(
+        responder=_responder_factory(
+            [
+                ("```python\nctx.a = 'x' * 500\n```", 9_000),
+                ("```python\nctx.b = 'y' * 500\n```", 9_500),
+                ("Done.", 10_000),
+            ]
+        )
+    )
+    # Share hooks between sandbox and agent so we can observe events from
+    # both in one place. context_reminder_emitted is fired by the Agent
+    # via its own hook registry, so without sharing we'd only see the
+    # sandbox-side events.
+    hooks = HookRegistry()
+    sandbox = Sandbox(root=tmp_path, hooks=hooks)
+    policy = ContextPolicy(budget_tokens=10_000, cooldown_turns=2)
+    agent = Agent(
+        model="m", llm=mock, sandbox=sandbox, hooks=hooks, context_policy=policy
+    )
+
+    reminder_events: list[int] = []
+    hooks.on(
+        "context_reminder_emitted",
+        lambda e: reminder_events.append(e.payload["turn"]),
+    )
+    agent.run("go")
+
+    # Only the first over-threshold turn should have fired the reminder.
+    assert reminder_events == [1]
+
+
+def test_reminder_emits_hook_event(tmp_path):
+    from coda.context import ContextPolicy
+
+    mock = MockLLMClient(
+        responder=_responder_factory(
+            [
+                ("```python\nctx.x = 'y' * 1000\n```", 9_000),
+                ("Done.", 9_500),
+            ]
+        )
+    )
+    hooks = HookRegistry()
+    sandbox = Sandbox(root=tmp_path, hooks=hooks)
+    policy = ContextPolicy(budget_tokens=10_000, cooldown_turns=0)
+    agent = Agent(
+        model="m", llm=mock, sandbox=sandbox, hooks=hooks, context_policy=policy
+    )
+
+    captured = hooks.capture()
+    agent.run("go")
+    reminder_events = [e for e in captured if e.type == "context_reminder_emitted"]
+    assert len(reminder_events) == 1
+    payload = reminder_events[0].payload
+    assert payload["turn"] == 1
+    assert payload["input_tokens"] == 9_000
+    assert payload["budget_tokens"] == 10_000
+    assert payload["ctx_entries"] >= 1
+
+
+# --- print-habit reminder integration ---------------------------------------
+
+
+def test_print_habit_reminder_fires_on_big_stdout(tmp_path):
+    from coda.context import ContextPolicy
+
+    # Agent prints a big blob; print-habit threshold set low.
+    mock = MockLLMClient(
+        responder=_responder_factory(
+            [
+                (
+                    "```python\n"
+                    "data = 'x' * 5000\n"
+                    "print(data)\n"
+                    "```",
+                    100,  # tiny input_tokens — threshold reminder won't fire
+                ),
+                ("Done.", 5_300),
+            ]
+        )
+    )
+    hooks = HookRegistry()
+    sandbox = Sandbox(root=tmp_path, hooks=hooks)
+    policy = ContextPolicy(
+        budget_tokens=1_000_000,  # huge — so threshold reminder DOES NOT fire
+        large_print_chars=2_000,
+        large_print_cooldown_turns=0,
+    )
+    agent = Agent(
+        model="m", llm=mock, sandbox=sandbox, hooks=hooks, context_policy=policy
+    )
+    captured = hooks.capture()
+    agent.run("go")
+
+    print_events = [e for e in captured if e.type == "print_habit_warning_emitted"]
+    threshold_events = [e for e in captured if e.type == "context_reminder_emitted"]
+    assert len(print_events) == 1
+    assert len(threshold_events) == 0  # not over threshold; only print-habit fired
+    payload = print_events[0].payload
+    assert payload["turn"] == 1
+    assert payload["stdout_chars"] >= 5_000
+
+
+def test_print_habit_reminder_includes_snippet_in_feedback(tmp_path):
+    from coda.context import ContextPolicy
+
+    mock = MockLLMClient(
+        responder=_responder_factory(
+            [
+                (
+                    "```python\n"
+                    "user = {'id': 'abc', 'data': 'x' * 4000}\n"
+                    "print(user)\n"
+                    "```",
+                    100,
+                ),
+                ("Done.", 5_000),
+            ]
+        )
+    )
+    hooks = HookRegistry()
+    sandbox = Sandbox(root=tmp_path, hooks=hooks)
+    policy = ContextPolicy(
+        budget_tokens=1_000_000,
+        large_print_chars=1_000,
+        large_print_cooldown_turns=0,
+    )
+    agent = Agent(
+        model="m", llm=mock, sandbox=sandbox, hooks=hooks, context_policy=policy
+    )
+    agent.run("go")
+
+    # The second LLM call should see the print-habit reminder appended
+    # to the user-feedback message.
+    last_user = mock.calls[1].messages[-1].content
+    assert "<system-reminder>" in last_user
+    assert "Offending line" in last_user
+    assert "print(user)" in last_user
+
+
+def test_print_habit_disabled_when_chars_zero(tmp_path):
+    from coda.context import ContextPolicy
+
+    mock = MockLLMClient(
+        responder=_responder_factory(
+            [
+                ("```python\nprint('x' * 100_000)\n```", 100),
+                ("Done.", 100_000),
+            ]
+        )
+    )
+    hooks = HookRegistry()
+    sandbox = Sandbox(root=tmp_path, hooks=hooks)
+    policy = ContextPolicy(budget_tokens=1_000_000, large_print_chars=0)
+    agent = Agent(
+        model="m", llm=mock, sandbox=sandbox, hooks=hooks, context_policy=policy
+    )
+    captured = hooks.capture()
+    agent.run("go")
+    assert [e for e in captured if e.type == "print_habit_warning_emitted"] == []
+
+
+def test_print_habit_cooldown_suppresses(tmp_path):
+    from coda.context import ContextPolicy
+
+    mock = MockLLMClient(
+        responder=_responder_factory(
+            [
+                ("```python\nprint('x' * 5000)\n```", 100),
+                ("```python\nprint('y' * 5000)\n```", 200),
+                ("Done.", 5_000),
+            ]
+        )
+    )
+    hooks = HookRegistry()
+    sandbox = Sandbox(root=tmp_path, hooks=hooks)
+    policy = ContextPolicy(
+        budget_tokens=1_000_000,
+        large_print_chars=2_000,
+        large_print_cooldown_turns=2,
+    )
+    agent = Agent(
+        model="m", llm=mock, sandbox=sandbox, hooks=hooks, context_policy=policy
+    )
+    captured = hooks.capture()
+    agent.run("go")
+
+    fires = [e.payload["turn"] for e in captured if e.type == "print_habit_warning_emitted"]
+    # Only turn 1 fires; turn 2 suppressed by cooldown.
+    assert fires == [1]
+
+
+def test_force_ctx_fires_on_tiny_data_print(tmp_path):
+    """Force mode fires regardless of stdout size, as long as a data print exists."""
+    from coda.context import ContextPolicy
+
+    mock = MockLLMClient(
+        responder=_responder_factory(
+            [
+                (
+                    "```python\n"
+                    "user = {'id': 'abc'}\n"
+                    "print(user)\n"  # tiny stdout but it IS a data print
+                    "```",
+                    100,
+                ),
+                ("Done.", 200),
+            ]
+        )
+    )
+    hooks = HookRegistry()
+    sandbox = Sandbox(root=tmp_path, hooks=hooks)
+    policy = ContextPolicy(
+        budget_tokens=1_000_000,
+        large_print_chars=10_000_000,   # size-based won't fire
+        force_ctx_on_print=True,
+        large_print_cooldown_turns=0,
+    )
+    agent = Agent(
+        model="m", llm=mock, sandbox=sandbox, hooks=hooks, context_policy=policy
+    )
+    captured = hooks.capture()
+    agent.run("go")
+
+    fires = [e for e in captured if e.type == "print_habit_warning_emitted"]
+    assert len(fires) == 1
+    assert fires[0].payload["mode"] == "force"
+    # And the feedback message includes the force-mode wording
+    last_user = mock.calls[1].messages[-1].content
+    assert "VIOLATION" in last_user
+    assert "print(user)" in last_user
+
+
+def test_force_ctx_ignores_pure_status_prints(tmp_path):
+    """`print('done')` is not a data print and should NOT fire force mode."""
+    from coda.context import ContextPolicy
+
+    mock = MockLLMClient(
+        responder=_responder_factory(
+            [
+                (
+                    "```python\n"
+                    "print('done')\n"
+                    "print(\"all good\")\n"
+                    "```",
+                    100,
+                ),
+                ("Done.", 200),
+            ]
+        )
+    )
+    hooks = HookRegistry()
+    sandbox = Sandbox(root=tmp_path, hooks=hooks)
+    policy = ContextPolicy(
+        budget_tokens=1_000_000,
+        force_ctx_on_print=True,
+        large_print_cooldown_turns=0,
+    )
+    agent = Agent(
+        model="m", llm=mock, sandbox=sandbox, hooks=hooks, context_policy=policy
+    )
+    captured = hooks.capture()
+    agent.run("go")
+    assert [e for e in captured if e.type == "print_habit_warning_emitted"] == []
+
+
+# --- ctx_delta in feedback --------------------------------------------------
+
+
+def test_ctx_delta_added_to_feedback_on_assignment(tmp_path):
+    mock = MockLLMClient(
+        responses=[
+            CompletionResponse(text="```python\nctx.user_tier = 'platinum'\n```"),
+            CompletionResponse(text="Done."),
+        ]
+    )
+    sandbox = Sandbox(root=tmp_path)
+    agent = Agent(model="m", llm=mock, sandbox=sandbox)
+    agent.run("go")
+    # The second LLM call should see the ctx_delta in the feedback message
+    last_user = mock.calls[1].messages[-1].content
+    assert "<ctx_delta>" in last_user
+    assert "# added: ctx.user_tier" in last_user
+    assert 'ctx.user_tier = "platinum"' in last_user
+
+
+def test_ctx_delta_omitted_when_no_change(tmp_path):
+    mock = MockLLMClient(
+        responses=[
+            CompletionResponse(text="```python\nx = 1 + 1\n```"),  # plain global, no ctx
+            CompletionResponse(text="Done."),
+        ]
+    )
+    sandbox = Sandbox(root=tmp_path)
+    agent = Agent(model="m", llm=mock, sandbox=sandbox)
+    agent.run("go")
+    last_user = mock.calls[1].messages[-1].content
+    assert "<ctx_delta>" not in last_user
+
+
+def test_ctx_delta_shows_drop(tmp_path):
+    mock = MockLLMClient(
+        responses=[
+            CompletionResponse(text="```python\nctx.x = 42\n```"),
+            CompletionResponse(text="```python\ndel ctx.x\n```"),
+            CompletionResponse(text="Done."),
+        ]
+    )
+    sandbox = Sandbox(root=tmp_path)
+    agent = Agent(model="m", llm=mock, sandbox=sandbox)
+    agent.run("go")
+    # Second user message (after turn 2) shows the drop in the delta
+    last_user = mock.calls[2].messages[-1].content
+    assert "<ctx_delta>" in last_user
+    assert "# removed: ctx.x" in last_user

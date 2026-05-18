@@ -161,6 +161,64 @@ def _primitives(ctx: Context) -> str:
     )
 
 
+def _ctx_namespace(ctx: Context) -> str:
+    return (
+        "## Inspecting values — use `ctx.NAME =`, not `print()`\n\n"
+        "**`ctx.NAME = value` is your print().** When you assign to ctx, the "
+        "harness pretty-prints the value back to you in the next user "
+        "message inside `<ctx_delta>`. You see it laid out across multiple "
+        "lines, the same way `print(value)` would render it — but the "
+        "value also persists for later turns, costs no extra tokens on "
+        "subsequent turns (the delta only renders entries that *changed* "
+        "this turn), and is tracked with a source expression for requery.\n\n"
+        "**Do NOT use `print()` for data.** A `print(value)` enters the "
+        "conversation history and is paid for on every subsequent turn. "
+        "Anything carrying data goes through `ctx`, not stdout. Short "
+        "status strings (`print(\"step 1 done\")`) are still fine.\n\n"
+        "Two persistent stores. Pick the right one each time:\n\n"
+        "1. **Plain globals** (`user = airline.get_user_details(...)`) — "
+        "persist across turns in the sandbox. The LLM does NOT see them. "
+        "Use plain globals for large records you want to filter or query "
+        "but don't need to *look at*.\n\n"
+        "2. **`ctx.*` attributes** (`ctx.user_summary = {...}`) — also "
+        "persist across turns, AND the value is rendered to you on "
+        "assignment via `<ctx_delta>`. Use ctx for any value you want to "
+        "verify, summarize, or carry forward.\n\n"
+        "Workflow:\n\n"
+        f"{CODE_FENCE}python\n"
+        "user = airline.get_user_details(user_id='abc')\n"
+        "ctx.user = user            # ctx_delta will pretty-print this for verification\n"
+        "ctx.tier = user['membership']\n"
+        "ctx.reservation_ids = user['reservations']\n"
+        f"{CODE_FENCE}\n\n"
+        "After this runs, the next user message will contain something like:\n\n"
+        f"{CODE_FENCE}\n"
+        "<ctx_delta>\n"
+        "# added: ctx.user\n"
+        "ctx.user = {\n"
+        "  \"id\": \"abc\",\n"
+        "  \"name\": {...},\n"
+        "  \"membership\": \"gold\",\n"
+        "  \"reservations\": [\"JG7FMM\", \"LQ940Q\", ...]\n"
+        "}\n"
+        "...\n"
+        "</ctx_delta>\n"
+        f"{CODE_FENCE}\n\n"
+        "Use this view to verify your fetches and computations — the way "
+        "you would have used print output. If a value isn't what you "
+        "expect, fix the code in your next block.\n\n"
+        "When you're done with a `ctx` entry: `del ctx.name`. The harness "
+        "keeps a requery hint (the expression that produced it) so it can "
+        "remind you how to bring it back later if you need to.\n\n"
+        "If you do print data (forgetting these rules), you'll get an "
+        "error-shaped `<system-reminder>` pointing at the offending line; "
+        "switch the `print(x)` to `ctx.NAME = x` next turn. If context "
+        "approaches its budget, you'll also see a threshold reminder "
+        "listing the largest ctx entries — drop or summarize what you "
+        "no longer need."
+    )
+
+
 def _output_format(ctx: Context) -> str:
     return (
         "## Output format\n\n"
@@ -329,6 +387,7 @@ def default_assembler() -> Assembler:
     a = Assembler()
     a.add(Section("intro", render=_intro, cache_stable=True))
     a.add(Section("primitives", render=_primitives, cache_stable=True))
+    a.add(Section("ctx_namespace", render=_ctx_namespace, cache_stable=True))
     a.add(
         Section(
             "filesystem_tools",
