@@ -62,7 +62,7 @@ def main() -> None:
         print(
             f"  turns={summary['turns']} "
             f"ctx={summary['ctx_entries_final']}/{summary['ctx_dropped_final']} "
-            f"matched={summary['actions_matched']}/{summary['gold_actions']} "
+            f"writes={summary['actions_matched']}/{summary['gold_writes']} "
             f"reminders={summary['reminder_fires']}",
             flush=True,
         )
@@ -76,23 +76,30 @@ def main() -> None:
         f"**force_ctx:** {force_ctx}",
         "",
         "| Task | Turns | In tokens | ctx live | ctx dropped | Reminders | "
-        "Matched | Result |",
+        "Writes | Result |",
         "|---|---|---|---|---|---|---|---|",
     ]
     total_matched = 0
     total_gold = 0
     full_passes = 0
     for s in summaries:
-        match_str = f"{s['actions_matched']}/{s['gold_actions']}"
-        if s["actions_matched"] == s["gold_actions"] and s["gold_actions"] > 0:
+        gold_writes = s["gold_writes"]
+        match_str = f"{s['actions_matched']}/{gold_writes}"
+        if gold_writes > 0 and s["actions_matched"] == gold_writes:
             result = "✅ full match"
+            full_passes += 1
+        elif gold_writes == 0 and s["actions_recorded"] == 0:
+            # Some tau-bench tasks have zero gold writes (the right move is
+            # refuse / no-mutation). Count those as pass when the agent
+            # also did no writes.
+            result = "✅ no-write match"
             full_passes += 1
         elif s["actions_matched"] > 0:
             result = "⚠️ partial"
         else:
             result = "❌ no match"
         total_matched += s["actions_matched"]
-        total_gold += s["gold_actions"]
+        total_gold += gold_writes
         lines.append(
             f"| {s['task_index']} | {s['turns']} | {s['input_tokens']:,} | "
             f"{s['ctx_entries_final']} | {s['ctx_dropped_final']} | "
@@ -101,7 +108,7 @@ def main() -> None:
     lines.append("")
     lines.append(
         f"**Overall:** {full_passes}/{len(summaries)} full passes, "
-        f"{total_matched}/{total_gold} actions matched."
+        f"{total_matched}/{total_gold} writes matched."
     )
     lines.append("")
     lines.append("## Per-task reports")

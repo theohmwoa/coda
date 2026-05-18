@@ -69,6 +69,8 @@ __all__ = [
     "ContextPolicy",
     "build_context_reminder",
     "build_print_habit_reminder",
+    "MODEL_CONTEXT_WINDOWS",
+    "resolve_budget_for_model",
 ]
 
 
@@ -96,6 +98,44 @@ DEFAULT_MAX_VALUE_CHARS = 2000
 # render_ctx output (used in threshold reminders) keeps the smaller cap
 # since it can fire repeatedly.
 DEFAULT_DELTA_VALUE_CHARS = 6000
+
+
+# Context windows in tokens for known Claude models. Used to auto-derive a
+# sensible `budget_tokens` on ContextPolicy when the caller doesn't pin it
+# explicitly. Numbers reflect the documented full-context capacity; you can
+# of course pin a smaller budget for testing or for cost reasons.
+MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "claude-opus-4-7": 1_000_000,
+    "claude-opus-4-6": 1_000_000,
+    "claude-sonnet-4-6": 200_000,
+    "claude-sonnet-4-5": 200_000,
+    "claude-haiku-4-5": 200_000,
+    # older lines, kept for compatibility
+    "claude-opus-4-5": 200_000,
+    "claude-3-7-sonnet": 200_000,
+    "claude-3-5-sonnet": 200_000,
+    "claude-3-5-haiku": 200_000,
+}
+
+# What to return when the model name doesn't prefix-match any known entry.
+# 200K is a safe, conservative floor — modern Claude models all support
+# at least that much. If the agent runs against an unknown future model
+# the policy will under-estimate the available room, never over-estimate.
+DEFAULT_BUDGET_FALLBACK = 200_000
+
+
+def resolve_budget_for_model(model: str) -> int:
+    """Look up the context window for `model`, prefix-matching MODEL_CONTEXT_WINDOWS.
+
+    Prefix match so `claude-opus-4-7[1m]` (with the [1m] suffix Anthropic
+    sometimes appends) resolves to the same window as `claude-opus-4-7`.
+    Falls back to DEFAULT_BUDGET_FALLBACK on no match — better to underrun
+    than overrun the model's real capacity.
+    """
+    for key, window in MODEL_CONTEXT_WINDOWS.items():
+        if model.startswith(key):
+            return window
+    return DEFAULT_BUDGET_FALLBACK
 
 
 # Filename Sandbox.execute() compiles user code to. We walk the stack
@@ -603,8 +643,11 @@ class ContextPolicy:
     they don't carry data.
     """
 
-    budget_tokens: int = 200_000
-    threshold_fraction: float = 0.75
+    budget_tokens: int | None = None     # None → resolve from model at Agent init
+    threshold_fraction: float = 0.85     # raised from 0.75: at this point ctx
+                                          # management is mostly handled by the
+                                          # print-habit reminder; threshold is a
+                                          # safety net, not a primary surface
     cooldown_turns: int = 2
     max_largest_entries: int = 5
     include_dropped: bool = True
@@ -612,12 +655,49 @@ class ContextPolicy:
     large_print_cooldown_turns: int = 1
     force_ctx_on_print: bool = False
 
+    def resolve_budget(self, model: str) -> int:
+        """Return the concrete budget for this run: explicit value, else from model."""
+        if self.budget_tokens is not None:
+            return self.budget_tokens
+        return resolve_budget_for_model(model)
+
     @property
     def threshold_tokens(self) -> int:
+        """Threshold against the explicit budget. Raises if budget is auto;
+        callers in that case should use `threshold_for(model)` instead."""
+        if self.budget_tokens is None:
+            raise ValueError(
+                "ContextPolicy.budget_tokens is None (auto). Use "
+                "policy.threshold_for(model) or policy.resolve_budget(model) "
+                "in code that needs the concrete number."
+            )
         return int(self.budget_tokens * self.threshold_fraction)
 
-    def should_remind(self, *, input_tokens: int, turns_since_last: int) -> bool:
-        if input_tokens < self.threshold_tokens:
+    def threshold_for(self, model: str) -> int:
+        return int(self.resolve_budget(model) * self.threshold_fraction)
+
+    def should_remind(
+        self,
+        *,
+        input_tokens: int,
+        turns_since_last: int,
+        model: str | None = None,
+    ) -> bool:
+        """Decide whether to fire the threshold reminder this turn.
+
+        `model` is required when `budget_tokens` is None (auto). Callers
+        that pin budget_tokens explicitly can omit it for backwards
+        compatibility with existing tests.
+        """
+        if self.budget_tokens is None:
+            if model is None:
+                raise ValueError(
+                    "should_remind: model must be passed when budget_tokens is auto"
+                )
+            threshold = self.threshold_for(model)
+        else:
+            threshold = self.threshold_tokens
+        if input_tokens < threshold:
             return False
         if turns_since_last < self.cooldown_turns:
             return False

@@ -48,6 +48,7 @@ from coda import Agent, ContextPolicy, HookRegistry, Sandbox, TraceWriter
 from coda.llm import ClaudeAgentSDKClient
 
 from tau_airline.airline_primitive import RecordedAction, build_airline, get_wiki  # noqa: F401
+from tau_airline.user_sim import CodaUserSimulator
 
 
 # Make tau-bench importable here too (for TASKS).
@@ -59,19 +60,27 @@ from tau_bench.envs.airline.tasks_test import TASKS  # noqa: E402
 
 
 PROMPT_PREAMBLE = """\
-You are an airline customer service agent. You have a single Python object
-in your sandbox called `airline` that exposes the booking system. Call its
-methods directly from your Python code blocks; do NOT emit JSON tool calls.
+You are an airline customer service agent. You have a Python object in
+your sandbox called `airline` that exposes the booking system, and a
+`respond(message: str) -> str` primitive for talking to the customer.
+Call them directly from your Python code blocks; do NOT emit JSON tool
+calls.
 
 The airline policy document is given to you below in this prompt. Cite
 section names when making policy decisions.
 
-IMPORTANT for this run: the user has pre-confirmed any action that is
-consistent with their stated preferences and conforms to airline policy.
-Do NOT ask the user for confirmation again before executing writes — just
-execute them. (Real-world deployment would gate writes on an explicit
-yes; we're bypassing that here so we can test the harness behavior on
-a fixed task spec.)
+Conversation flow:
+- The customer's opening message is in the user prompt below.
+- Call `respond("...")` to ask the customer a question or confirm an
+  action. The function returns the customer's reply as a string.
+- Each `respond()` call counts as one customer turn — keep them
+  purposeful (one question at a time, gather what you need, then act).
+- If the customer's reply contains '###STOP###', the conversation is
+  over. Do NOT call `respond` again. End your turn with a prose summary
+  (no code block) so the loop exits.
+- Per the policy wiki, you must obtain the customer's explicit 'yes'
+  before any database write (booking, modifying, cancelling, etc.).
+  Use `respond` for that.
 
 `airline` methods:
   Read-only:
@@ -83,7 +92,7 @@ a fixed task spec.)
     airline.calculate(expression)   # eval an arithmetic expression
     airline.think(thought)          # no-op scratch
 
-  Writes (database-mutating):
+  Writes (database-mutating; require explicit user 'yes' first):
     airline.book_reservation(user_id, origin, destination, flight_type, cabin,
         flights, passengers, payment_methods, total_baggages, nonfree_baggages, insurance)
     airline.cancel_reservation(reservation_id)
@@ -100,13 +109,18 @@ The wiki you must follow:
 ---
 {wiki}
 ---
-
-Your task is below. Operate on this single specification; do not ask
-clarifying questions. When done, end with a prose summary (no code block).
 """
 
 
-def run_one(task_index: int, *, budget_tokens: int, model: str, force_ctx: bool = False) -> dict:
+def run_one(
+    task_index: int,
+    *,
+    budget_tokens: int,
+    model: str,
+    force_ctx: bool = False,
+    use_user_sim: bool = True,
+    user_sim_model: str = "claude-sonnet-4-6",
+) -> dict:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     runs_dir = _THIS_DIR / ".runs"
     runs_dir.mkdir(exist_ok=True)
@@ -119,6 +133,25 @@ def run_one(task_index: int, *, budget_tokens: int, model: str, force_ctx: bool 
     hooks = HookRegistry()
     sandbox = Sandbox(hooks=hooks)
     sandbox.inject("airline", airline)
+
+    # The user simulator plays the customer. Each `respond(...)` call from
+    # the agent goes through .step() and gets an LLM-generated reply that
+    # follows the task.instruction persona. Without this the agent has
+    # no way to obtain the 'yes' the policy wiki requires before writes.
+    user_sim: CodaUserSimulator | None = None
+    if use_user_sim:
+        user_sim = CodaUserSimulator(instruction=task.instruction, model=user_sim_model)
+        opening = user_sim.reset()
+        opening_user_msg = opening  # what the agent sees as the first user turn
+
+        def respond(message: str) -> str:
+            if user_sim is None:
+                return "###STOP###"
+            return user_sim.step(message)
+
+        sandbox.inject("respond", respond)
+    else:
+        opening_user_msg = task.instruction
 
     policy = ContextPolicy(
         budget_tokens=budget_tokens,
@@ -151,11 +184,16 @@ def run_one(task_index: int, *, budget_tokens: int, model: str, force_ctx: bool 
     )
 
     with TraceWriter(trace_path).attach(hooks):
-        result = agent.run(task.instruction)
+        result = agent.run(opening_user_msg)
 
     # Compare recorded actions to gold actions, ignoring respond-only actions.
+    # tau-bench's reward function only diffs the database state, so only
+    # WRITE actions count toward pass/fail; gold reads (get_*, search_*,
+    # calculate) are informational and we don't expect the agent's exact
+    # read sequence to match. The matcher pulls writes from gold; the
+    # denominator (`gold_writes`) is the number of writes gold made.
     gold = [a for a in task.actions if a.name != "respond"]
-    matched, missing = _action_match(actions, gold)
+    matched, missing, gold_writes = _action_match(actions, gold)
 
     summary = {
         "task_index": task_index,
@@ -169,10 +207,13 @@ def run_one(task_index: int, *, budget_tokens: int, model: str, force_ctx: bool 
         "ctx_dropped_final": len(sandbox.ctx._dropped()),
         "reminder_fires": len(reminder_fires),
         "actions_recorded": len(actions),
-        "gold_actions": len(gold),
+        "gold_actions": len(gold),         # total gold incl. reads (for context)
+        "gold_writes": gold_writes,        # the denominator that matters
         "actions_matched": matched,
         "actions_missing": missing,
         "terminated_by_transfer": terminate[0],
+        "user_sim_calls": user_sim.call_count if user_sim else 0,
+        "user_sim_stopped": user_sim.stopped if user_sim else False,
         "final_text": result.text,
         "trace_path": str(trace_path),
         "report_path": str(report_path),
@@ -186,11 +227,20 @@ def run_one(task_index: int, *, budget_tokens: int, model: str, force_ctx: bool 
     return summary
 
 
-def _action_match(recorded: list[RecordedAction], gold) -> tuple[int, list[str]]:
-    """Coarse pass: an action is 'matched' if a recorded write with the
-    same name + same key argument was emitted. For update_reservation_*,
-    the reservation_id is the key argument; for book_reservation, the
-    user_id; for cancel/send_certificate, reservation_id/user_id."""
+def _action_match(recorded: list[RecordedAction], gold) -> tuple[int, list[str], int]:
+    """Match recorded WRITES to gold WRITES.
+
+    Returns (matched_count, missing_descriptions, total_gold_writes).
+
+    Reads/searches/calculate aren't counted on either side — tau-bench's
+    reward function only diffs the final DB state, and reads can't change
+    it. The matcher pairs a recorded write with a gold write iff they
+    share name + the key arg (reservation_id or user_id depending on
+    the tool). Args beyond the key (cabin, flights[]) aren't checked
+    here — that's a coarser pass than tau-bench's hash check. For the
+    canonical pass/fail, call `tau_bench_data_hash_match` from
+    scoring.py against the data after the run.
+    """
     key_arg_by_tool = {
         "book_reservation": "user_id",
         "cancel_reservation": "reservation_id",
@@ -207,8 +257,10 @@ def _action_match(recorded: list[RecordedAction], gold) -> tuple[int, list[str]]
             rec_by_key[(r.name, kv)] = rec_by_key.get((r.name, kv), 0) + 1
     matched = 0
     missing: list[str] = []
+    gold_writes = 0
     for g in gold:
         if g.name in key_arg_by_tool:
+            gold_writes += 1
             k = key_arg_by_tool[g.name]
             kv = str(g.kwargs.get(k, ""))
             if rec_by_key.get((g.name, kv), 0) > 0:
@@ -216,7 +268,7 @@ def _action_match(recorded: list[RecordedAction], gold) -> tuple[int, list[str]]
                 rec_by_key[(g.name, kv)] -= 1
             else:
                 missing.append(f"{g.name}(...{k}={kv}...)")
-    return matched, missing
+    return matched, missing, gold_writes
 
 
 def _write_report(summary: dict, task, actions: list[RecordedAction], reminders: list[dict], path: Path):
@@ -234,9 +286,11 @@ def _write_report(summary: dict, task, actions: list[RecordedAction], reminders:
         f"- Input tokens (sum): **{summary['input_tokens']:,}**",
         f"- Output tokens (sum): **{summary['output_tokens']:,}**",
         f"- Reminders fired: **{summary['reminder_fires']}**",
+        f"- User-sim calls: **{summary['user_sim_calls']}** "
+        f"(stopped: {summary['user_sim_stopped']})",
         f"- ctx live / dropped at end: {summary['ctx_entries_final']} / {summary['ctx_dropped_final']}",
-        f"- Actions recorded / gold: **{summary['actions_recorded']} / {summary['gold_actions']}**",
-        f"- Actions matched: **{summary['actions_matched']}**",
+        f"- Actions recorded / gold (incl reads): **{summary['actions_recorded']} / {summary['gold_actions']}**",
+        f"- Writes matched: **{summary['actions_matched']} / {summary['gold_writes']}**",
     ]
     if summary["actions_missing"]:
         lines.append("- Actions missing:")
@@ -286,6 +340,17 @@ def main():
         action="store_true",
         help="Force-ctx mode: every non-trivial print() fires an error-shaped reminder pushing the agent toward ctx.",
     )
+    ap.add_argument(
+        "--no-user-sim",
+        action="store_true",
+        help="Disable the user simulator; agent gets task.instruction as the only user message and respond() is not injected.",
+    )
+    ap.add_argument(
+        "--user-sim-model",
+        type=str,
+        default="claude-sonnet-4-6",
+        help="Model used by the customer simulator. Sonnet is cheap and enough for this role.",
+    )
     args = ap.parse_args()
 
     summary = run_one(
@@ -293,6 +358,8 @@ def main():
         budget_tokens=args.budget,
         model=args.model,
         force_ctx=args.force_ctx,
+        use_user_sim=not args.no_user_sim,
+        user_sim_model=args.user_sim_model,
     )
     print(f"\nDone. Turns: {summary['turns']}. Reminders: {summary['reminder_fires']}. "
           f"Actions: {summary['actions_matched']}/{summary['gold_actions']}.")

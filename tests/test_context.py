@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from coda.context import (
+    MODEL_CONTEXT_WINDOWS,
     ContextPolicy,
     Ctx,
     _parse_assignment_rhs,
@@ -13,6 +14,7 @@ from coda.context import (
     render_ctx,
     render_ctx_delta,
     render_value,
+    resolve_budget_for_model,
 )
 
 
@@ -590,9 +592,9 @@ def test_ctx_token_estimate_grows_with_entries():
 # --- ContextPolicy ----------------------------------------------------------
 
 
-def test_policy_default_threshold_at_75pct():
+def test_policy_default_threshold_at_85pct():
     p = ContextPolicy(budget_tokens=10_000)
-    assert p.threshold_tokens == 7_500
+    assert p.threshold_tokens == 8_500
 
 
 def test_policy_below_threshold_no_remind():
@@ -602,7 +604,7 @@ def test_policy_below_threshold_no_remind():
 
 def test_policy_at_threshold_reminds():
     p = ContextPolicy(budget_tokens=10_000, cooldown_turns=0)
-    assert p.should_remind(input_tokens=7_500, turns_since_last=999) is True
+    assert p.should_remind(input_tokens=8_500, turns_since_last=999) is True
 
 
 def test_policy_cooldown_suppresses_recent_reminders():
@@ -618,6 +620,71 @@ def test_policy_custom_threshold_fraction():
     assert p.threshold_tokens == 5_000
     assert p.should_remind(input_tokens=4_999, turns_since_last=999) is False
     assert p.should_remind(input_tokens=5_000, turns_since_last=999) is True
+
+
+# --- auto-budget from model -------------------------------------------------
+
+
+def test_resolve_budget_for_known_models():
+    assert resolve_budget_for_model("claude-opus-4-7") == 1_000_000
+    assert resolve_budget_for_model("claude-sonnet-4-6") == 200_000
+    assert resolve_budget_for_model("claude-haiku-4-5") == 200_000
+
+
+def test_resolve_budget_prefix_match():
+    # Suffix-tagged models (e.g. the [1m] context-bumped variant) should
+    # still resolve via prefix match.
+    assert resolve_budget_for_model("claude-opus-4-7[1m]") == 1_000_000
+    assert resolve_budget_for_model("claude-sonnet-4-6-20260321") == 200_000
+
+
+def test_resolve_budget_unknown_model_falls_back():
+    # Conservative fallback: 200K is a safe floor for modern Claudes.
+    assert resolve_budget_for_model("future-model-unknown") == 200_000
+    assert resolve_budget_for_model("") == 200_000
+
+
+def test_policy_with_none_budget_resolves_from_model():
+    p = ContextPolicy()  # budget_tokens defaults to None
+    assert p.budget_tokens is None
+    assert p.resolve_budget("claude-opus-4-7") == 1_000_000
+    assert p.resolve_budget("claude-sonnet-4-6") == 200_000
+
+
+def test_policy_threshold_tokens_raises_when_auto():
+    """The .threshold_tokens property is for code that already pinned a
+    budget; callers using auto-mode must use threshold_for(model)."""
+    p = ContextPolicy()
+    with pytest.raises(ValueError, match="auto"):
+        _ = p.threshold_tokens
+
+
+def test_policy_threshold_for_model_works_in_auto_mode():
+    p = ContextPolicy(threshold_fraction=0.85)  # auto budget
+    # Opus → 1M × 0.85 = 850K
+    assert p.threshold_for("claude-opus-4-7") == 850_000
+    # Sonnet → 200K × 0.85 = 170K
+    assert p.threshold_for("claude-sonnet-4-6") == 170_000
+
+
+def test_should_remind_with_auto_budget_requires_model():
+    p = ContextPolicy(cooldown_turns=0)  # auto budget
+    # Pinned budget tests can skip model, but auto must pass it
+    with pytest.raises(ValueError, match="model must be passed"):
+        p.should_remind(input_tokens=900_000, turns_since_last=999)
+
+
+def test_should_remind_auto_budget_fires_at_resolved_threshold():
+    p = ContextPolicy(cooldown_turns=0, threshold_fraction=0.85)
+    # Opus 1M × 0.85 = 850K threshold
+    assert p.should_remind(input_tokens=849_000, turns_since_last=999, model="claude-opus-4-7") is False
+    assert p.should_remind(input_tokens=850_000, turns_since_last=999, model="claude-opus-4-7") is True
+
+
+def test_model_context_windows_includes_current_lineup():
+    assert "claude-opus-4-7" in MODEL_CONTEXT_WINDOWS
+    assert "claude-sonnet-4-6" in MODEL_CONTEXT_WINDOWS
+    assert "claude-haiku-4-5" in MODEL_CONTEXT_WINDOWS
 
 
 # --- build_context_reminder -------------------------------------------------

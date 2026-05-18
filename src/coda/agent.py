@@ -284,15 +284,21 @@ class Agent:
             # entries with requery hints so the agent can bring them back
             # without losing the call that produced them.
             if self.context_policy is not None:
+                # Resolve the concrete budget for THIS model — auto when the
+                # policy didn't pin a number. This is what lets a default
+                # ContextPolicy() do the right thing on Opus 4.7 (1M window)
+                # vs Sonnet (200K) without the caller having to think about it.
+                budget_concrete = self.context_policy.resolve_budget(self.model)
                 fire = self.context_policy.should_remind(
                     input_tokens=resp.input_tokens,
                     turns_since_last=turns_since_reminder,
+                    model=self.model,
                 )
                 if fire:
                     reminder = build_context_reminder(
                         self.sandbox.ctx,
                         input_tokens=resp.input_tokens,
-                        budget_tokens=self.context_policy.budget_tokens,
+                        budget_tokens=budget_concrete,
                         max_largest_entries=self.context_policy.max_largest_entries,
                         include_dropped=self.context_policy.include_dropped,
                     )
@@ -304,7 +310,7 @@ class Agent:
                             payload={
                                 "turn": turn,
                                 "input_tokens": resp.input_tokens,
-                                "budget_tokens": self.context_policy.budget_tokens,
+                                "budget_tokens": budget_concrete,
                                 "ctx_entries": len(self.sandbox.ctx),
                                 "ctx_dropped": len(self.sandbox.ctx._dropped()),
                             },

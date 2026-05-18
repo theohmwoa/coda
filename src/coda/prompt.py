@@ -212,10 +212,9 @@ def _ctx_namespace(ctx: Context) -> str:
         "remind you how to bring it back later if you need to.\n\n"
         "If you do print data (forgetting these rules), you'll get an "
         "error-shaped `<system-reminder>` pointing at the offending line; "
-        "switch the `print(x)` to `ctx.NAME = x` next turn. If context "
-        "approaches its budget, you'll also see a threshold reminder "
-        "listing the largest ctx entries — drop or summarize what you "
-        "no longer need."
+        "switch the `print(x)` to `ctx.NAME = x` next turn. On very "
+        "long runs you may also see a threshold reminder listing your "
+        "largest ctx entries — drop or summarize then."
     )
 
 
