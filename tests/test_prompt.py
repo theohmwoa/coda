@@ -206,3 +206,48 @@ def test_agent_accepts_custom_assembler(tmp_path):
         prompt_assembler=a,
     )
     assert "## CUSTOM SECTION FOR TEST" in agent.system_prompt
+
+
+# --- ctx namespace section --------------------------------------------------
+
+
+def test_default_prompt_documents_ctx_namespace():
+    prompt = build_system_prompt()
+    assert "ctx" in prompt
+    # The new section heading frames ctx as the print-replacement.
+    assert "Inspecting values" in prompt or "ctx_delta" in prompt
+    # The model needs to see the syntax.
+    assert "ctx." in prompt
+    # And the contrast with plain globals.
+    assert "Plain globals" in prompt
+    # And the explicit "do not print data" rule.
+    assert "Do NOT" in prompt or "DO NOT" in prompt or "do not use" in prompt.lower()
+    # And the ctx_delta surface (so the agent knows it doesn't need print).
+    assert "ctx_delta" in prompt
+    # And the threshold-reminder + print-habit-reminder behavior.
+    assert "system-reminder" in prompt
+
+
+def test_prompt_does_not_show_print_of_data_in_examples():
+    """The prompt's worked examples should NOT include `print(user)` or
+    similar — when the model copies the example, it shouldn't copy a
+    data print."""
+    prompt = build_system_prompt()
+    # The 'Right pattern' example block should be data-print-free.
+    # We don't assert no `print(` anywhere — short status prints are
+    # allowed in prose — but the worked examples must not show
+    # `print(user)`, `print(reservation)`, etc.
+    bad_patterns = ["print(user)", "print(record)", "print(reservation)", "print(data)"]
+    for pat in bad_patterns:
+        assert pat not in prompt, f"prompt still shows {pat!r} as an example"
+
+
+def test_ctx_section_is_cache_stable():
+    # ctx documentation doesn't depend on user config — it should be in
+    # the cache-stable prefix so it caches across runs.
+    a = default_assembler()
+    preview = a.preview({})
+    ctx_section = next(s for s in preview if s["name"] == "ctx_namespace")
+    assert ctx_section["cache_stable"] is True
+    assert ctx_section["included"] is True
+    assert ctx_section["chars"] > 100

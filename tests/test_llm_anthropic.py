@@ -22,6 +22,8 @@ class _Block:
 class _Usage:
     input_tokens: int
     output_tokens: int
+    cache_read_input_tokens: int = 0
+    cache_creation_input_tokens: int = 0
 
 
 @dataclass
@@ -132,3 +134,27 @@ def test_tool_choice_modes():
         tool_choice=ToolChoice(mode="auto"),
     )
     assert fake.messages.last_kwargs["tool_choice"] == {"type": "auto"}
+
+
+def test_input_tokens_sums_cache_read_and_creation():
+    # The Anthropic API splits new-input tokens from cached ones; coda's
+    # threshold policy needs the SUM, because the model still sees all of
+    # them. Without this, a heavily-cached run reports ~3 input_tokens
+    # and threshold reminders never fire.
+    client, fake = _make()
+    fake.messages.next_response = _Resp(
+        content=[_Block(type="text", text="hi")],
+        stop_reason="end_turn",
+        usage=_Usage(
+            input_tokens=3,
+            output_tokens=5,
+            cache_read_input_tokens=11_102,
+            cache_creation_input_tokens=2_292,
+        ),
+    )
+    resp = client.complete(
+        system="sys", messages=[Message("user", "go")], model="m"
+    )
+    # 3 + 11,102 + 2,292 = 13,397
+    assert resp.input_tokens == 13_397
+    assert resp.output_tokens == 5

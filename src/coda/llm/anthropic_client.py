@@ -103,11 +103,23 @@ def _decode_response(resp: Any) -> CompletionResponse:
                 ToolCall(id=block.id, name=block.name, input=dict(block.input))
             )
     usage = getattr(resp, "usage", None)
+    # The Anthropic API splits `input_tokens` (only NEW, uncached) from
+    # `cache_read_input_tokens` and `cache_creation_input_tokens`. Context
+    # budget checks must sum all three — the model SEES every cached token,
+    # cache just reduces $/latency. Sub the missing fields default to 0,
+    # which is correct for non-cached responses.
+    input_total = 0
+    if usage is not None:
+        input_total = (
+            (getattr(usage, "input_tokens", 0) or 0)
+            + (getattr(usage, "cache_read_input_tokens", 0) or 0)
+            + (getattr(usage, "cache_creation_input_tokens", 0) or 0)
+        )
     return CompletionResponse(
         text="".join(text_chunks),
         tool_calls=tool_calls,
         stop_reason=getattr(resp, "stop_reason", "end_turn") or "end_turn",
-        input_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
-        output_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
+        input_tokens=input_total,
+        output_tokens=(getattr(usage, "output_tokens", 0) or 0) if usage else 0,
         raw=resp,
     )

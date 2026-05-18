@@ -20,6 +20,7 @@ traces/
 *.coda
 *.jsonl
 runs/
+.runs/
 
 # but DO keep the committed sample run that ships with the example
 !examples/sample_run/*.jsonl

@@ -1,6 +1,14 @@
 """coda — a CodeAct coding harness with typed sub-agents and line-level observability."""
 
 from .agent import Agent, RunResult
+from .context import (
+    ContextPolicy,
+    Ctx,
+    CtxEntry,
+    build_context_reminder,
+    ctx_token_estimate,
+    render_ctx,
+)
 from .hooks import Event, EventType, HookRegistry
 from .llm import (
     AnthropicClient,
@@ -28,6 +36,12 @@ __version__ = "0.0.1"
 __all__ = [
     "Agent",
     "RunResult",
+    "Ctx",
+    "CtxEntry",
+    "ContextPolicy",
+    "build_context_reminder",
+    "ctx_token_estimate",
+    "render_ctx",
     "Sandbox",
     "ExecutionResult",
     "HookRegistry",

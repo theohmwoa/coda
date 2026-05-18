@@ -178,3 +178,85 @@ def test_inject_makes_value_visible(sandbox):
     sandbox.inject("MY_VAR", 42)
     r = sandbox.execute("print(MY_VAR * 2)")
     assert r.stdout.strip() == "84"
+
+
+# --- ctx namespace (two-namespace context model) ---------------------------
+
+
+def test_ctx_is_available_as_global(sandbox):
+    r = sandbox.execute("ctx.x = 42\nprint(ctx.x)")
+    assert r.error is None
+    assert r.stdout.strip() == "42"
+
+
+def test_ctx_assignment_captures_source_expression(sandbox):
+    sandbox.execute("ctx.policy_doc = 'this is the refund policy'")
+    entry = sandbox.ctx._entries()["policy_doc"]
+    assert entry.value == "this is the refund policy"
+    assert entry.source_expr == "'this is the refund policy'"
+
+
+def test_ctx_assignment_captures_complex_expression(sandbox):
+    sandbox.execute(
+        "items = [1, 2, 3, 4, 5]\n"
+        "ctx.evens = [x for x in items if x % 2 == 0]\n"
+    )
+    entry = sandbox.ctx._entries()["evens"]
+    assert entry.value == [2, 4]
+    assert entry.source_expr == "[x for x in items if x % 2 == 0]"
+
+
+def test_ctx_persists_across_executions(sandbox):
+    sandbox.execute("ctx.x = 1")
+    sandbox.execute("ctx.y = ctx.x + 1")
+    assert sandbox.ctx._entries()["y"].value == 2
+
+
+def test_ctx_drop_via_del_records_requery_hint(sandbox):
+    sandbox.execute(
+        "def fetch_policy(): return 'mock policy text'\n"
+        "ctx.policy = fetch_policy()\n"
+    )
+    sandbox.execute("del ctx.policy")
+    dropped = sandbox.ctx._dropped()
+    assert "policy" in dropped
+    assert dropped["policy"].source_expr == "fetch_policy()"
+    # Live entries no longer contain it.
+    assert "policy" not in sandbox.ctx._entries()
+
+
+def test_ctx_plain_globals_stay_sandbox_only(sandbox):
+    # Plain globals persist across calls (existing behavior) but never
+    # enter the ctx namespace.
+    sandbox.execute("bookings = [{'id': i} for i in range(100)]")
+    r = sandbox.execute("print(len(bookings))")
+    assert r.stdout.strip() == "100"
+    assert sandbox.ctx._entries() == {}
+
+
+def test_ctx_events_flow_through_hooks(sandbox):
+    captured = sandbox.hooks.capture()
+    sandbox.execute("ctx.foo = 123\ndel ctx.foo\n")
+    event_types = [e.type for e in captured]
+    assert "ctx_assigned" in event_types
+    assert "ctx_dropped" in event_types
+    assigned = next(e for e in captured if e.type == "ctx_assigned")
+    assert assigned.payload["name"] == "foo"
+    assert assigned.payload["source_expr"] == "123"
+
+
+def test_ctx_source_lines_cleared_after_execution(sandbox):
+    sandbox.execute("ctx.x = 1")
+    # After execute() finishes, the source provider returns None so
+    # any out-of-band ctx writes (e.g. from a Python script using sandbox.ctx
+    # directly) don't accidentally pick up the wrong source line.
+    assert sandbox._current_source_lines is None
+
+
+def test_ctx_source_capture_survives_syntax_errors(sandbox):
+    # A SyntaxError on one execute() shouldn't leave stale source lines.
+    sandbox.execute("ctx.first = 1")
+    sandbox.execute("def broken(:")  # syntax error
+    sandbox.execute("ctx.second = 2")
+    assert sandbox.ctx._entries()["first"].source_expr == "1"
+    assert sandbox.ctx._entries()["second"].source_expr == "2"
