@@ -58,6 +58,9 @@ Conversation flow:
   action. The function returns the customer's reply as a string.
 - Each `respond()` call counts as one customer turn — keep them
   purposeful (one question at a time, gather what you need, then act).
+- If the customer's request involves an existing reservation and they
+  have not provided a reservation ID, ask for it before proceeding:
+  e.g. `respond("Could you please provide your reservation ID?")`.
 - If the customer's reply contains '###STOP###', '###TRANSFER###', or
   '###OUT-OF-SCOPE###', the conversation is over. Do NOT call `respond`
   again. End your turn with a prose summary (no code block) so the loop
