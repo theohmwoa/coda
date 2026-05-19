@@ -95,17 +95,19 @@ Five patterns account for all 10 misses:
 
 The single largest pattern is still the architecture bug the turn-boundary prompt was meant to fix: the agent emits several `​```python` blocks in one assistant message, and later blocks reference values that earlier blocks were supposed to produce — but the LLM had to imagine those values because nothing executes until the message is finished.
 
-Smoking gun from task 39's trace:
+Smoking gun from task 39's trace. Turn 1 was a single-block greeting (customer's opening message had volunteered the name + user id, so the agent had real data going into turn 2). Turn 2 emitted *two* code blocks in one assistant message:
 
 ```python
-# Block A (same turn): respond("Could you provide your user id?")
-# Block B (same turn): user = airline.get_user_details('amelia_davis_8890')
-#                      ctx.user = user
-# Block C (same turn): res1 = airline.get_reservation_details('reservation_26789')
-#                      res2 = airline.get_reservation_details('reservation_88597')
+# Turn 2 / Block A:
+user = airline.get_user_details('amelia_davis_8890')    # real user_id from customer opening
+ctx.user = user
+
+# Turn 2 / Block B (same assistant message):
+res1 = airline.get_reservation_details('reservation_26789')
+res2 = airline.get_reservation_details('reservation_88597')
 ```
 
-Block C ran in the same assistant message as Block B, so the LLM had no idea what `ctx.user['reservations']` actually contained. It invented `reservation_26789` and `reservation_88597`. Both errored. The agent's own postmortem confesses the real reservation IDs and apologises.
+Block B ran in the same message as Block A, so the LLM had no idea what `ctx.user['reservations']` actually contained at write time. It invented `reservation_26789` and `reservation_88597` — both errored. The agent's own postmortem confesses the real reservation IDs and apologises.
 
 Same shape on task 30 (`reservation_id_4220684`) and task 42 (`AQTWTM`).
 
